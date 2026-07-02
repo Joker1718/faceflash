@@ -218,7 +218,7 @@ Needs a [Rust toolchain](https://rustup.rs) to compile the AVX-512/NEON backend;
 - 10K–150K galleries — the sweet spot where the scan beats HNSW on latency *and* memory (they tie at ~200K)
 - Offline / air-gapped — a Raspberry Pi or cheap VPS, no GPU, no network
 
-Use HNSW instead when you're past ~500K faces and need sub-millisecond single queries, when RAM isn't your constraint, or when you want years of production hardening.
+Use HNSW instead when you're past ~300K faces and single-query latency matters more than RAM, or when you want years of production hardening.
 
 ## How it works
 

@@ -83,7 +83,7 @@ def load_ann_scale(scale="100K"):
 def chart_memory_bar():
     s = load_ann_scale("100K")
     pick = {  # one representative per family
-        "HNSWLIB (ef=128)": "HNSWLIB", "USearch (HNSW)": "USearch",
+        "HNSWLIB (ef=128)": "HNSWLIB", "USearch (exp=256)": "USearch",
         "FAISS-Flat (exact)": "FAISS-Flat", "ScaNN (leaves=316)": "ScaNN",
         "FaceFlash (256b/300c)": "FaceFlash",
     }
@@ -108,8 +108,10 @@ def chart_memory_bar():
                 fontweight="bold" if is_ff else "medium",
                 color=ACCENT_DK if is_ff else SUBINK)
     ax.set_xlabel("Memory to index 100,000 faces (MB) — lower is better")
-    titled(ax, "FaceFlash uses ~96× less memory than HNSW",
-           "Same recall, a fraction of the RAM · MS1MV2, 100K faces")
+    by = dict((r[0], r[1]) for r in rows)
+    ratio = by["HNSWLIB"] / by["FaceFlash"]
+    titled(ax, f"FaceFlash uses ~{ratio:.0f}× less memory than HNSW",
+           "Same recall, a fraction of the RAM · MS1MV2, 100K faces · memory measured from saved-index size")
     ax.set_xlim(0, max(mem) * 1.20)
     ax.grid(axis="y", visible=False)
     ax.tick_params(left=False)
@@ -131,7 +133,7 @@ def chart_pareto():
     # top-right corner (FAISS/HNSW/USearch) doesn't overlap
     notable = {"FaceFlash (256b/300c)": ("FaceFlash", (10, 10)),
                "HNSWLIB (ef=128)": ("HNSW", (8, 10)),
-               "USearch (HNSW)": ("USearch", (10, -18)),
+               "USearch (exp=256)": ("USearch", (10, -18)),
                "ScaNN (leaves=316)": ("ScaNN", (10, 8)),
                "FAISS-Flat (exact)": ("FAISS-Flat", (-12, 12))}
     for m in s["methods"]:
