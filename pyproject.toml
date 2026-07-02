@@ -47,6 +47,9 @@ gpu = ["onnxruntime-gpu>=1.16"]
 dev = ["pytest", "matplotlib", "pandas", "onnxruntime>=1.16"]
 benchmark = ["faiss-cpu>=1.7", "usearch>=2.0", "hnswlib>=0.7"]
 
+[project.scripts]
+faceflash = "faceflash.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/raghavenderreddygrudhanti/faceflash"
 Repository = "https://github.com/raghavenderreddygrudhanti/faceflash"

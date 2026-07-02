@@ -32,6 +32,15 @@ ff.verify("photo1.jpg", "photo2.jpg")  # 1:1 — same person?
 ff.remove("Bob")                       # deletes from the .db file too (GDPR)
 ```
 
+```bash
+# Or skip Python entirely — the same database from the shell:
+pipx install faceflash
+faceflash register --db faces.db --name Alice alice.jpg
+faceflash search --db faces.db query.jpg              # JSON out
+faceflash search-all --db faces.db group_photo.jpg    # every face in the image
+faceflash serve --db faces.db --port 8080             # tiny REST API
+```
+
 Reopen `faces.db` tomorrow and keep adding faces — streaming insertion needs no PCA refit and no file rewrite. Binary codes load into RAM at open (~92ms at 100K); float embeddings stay on disk and the rerank fetches only the ~100 candidate rows per query, which costs about +0.2ms over RAM-resident floats. If you want the old explicit-snapshot workflow, `ff.save("my_index/")` still writes the .npy directory format, and either format converts to the other via `save()`/`load()`.
 
 There's also a batch path (`ff.index.search_batch(embeddings, k=1)`) for bulk dedup, watchlists, and video frames — roughly 11× the throughput of one-at-a-time at 100K.
@@ -188,7 +197,20 @@ The `confidence` field is raw cosine similarity, not a probability — 0.92 does
 | **0.40 (default)** | < 0.001% | 10.1% |
 | 0.50 | < 0.001% | 27.2% |
 
-The equal-error rate is ~1.0% at threshold ~0.17. The 0.4 default is deliberately conservative: essentially zero false accepts, at the cost of rejecting ~10% of genuine matches. If your gallery photos are good and a false reject just means "try again", 0.4 is right; if false rejects are expensive, drop toward 0.3. Rerun the script on embeddings from your own population — these rates shift with demographics and photo quality.
+The equal-error rate is ~1.0% at threshold ~0.17. The 0.4 default is deliberately conservative: essentially zero false accepts, at the cost of rejecting ~10% of genuine matches.
+
+Better: skip the raw cosine numbers entirely and set the threshold in error-rate units —
+
+```python
+ff.calibrate()                            # measures impostor scores on YOUR gallery once,
+                                          # persists the curve in the index
+ff.search("query.jpg", max_far=0.001)     # "at most 1-in-1,000 false accepts"
+ff.verify("a.jpg", "b.jpg", max_far=0.0001)
+```
+
+Until you calibrate, `max_far` falls back to the LFW anchors above. These rates shift with demographics and photo quality, which is exactly why `calibrate()` exists.
+
+Two more things `register()` does to keep your gallery honest: it **refuses images with no detectable face** (raises `NoFaceFoundError` instead of silently indexing a center crop of whatever the photo was — pass `allow_fallback=True` to override), and it **flags probable duplicates at enroll time** ("this face matches existing person Alice at 0.93" in the result and the logs) so mislabeled galleries get caught at the door.
 
 ### Is the win the compression or the search?
 

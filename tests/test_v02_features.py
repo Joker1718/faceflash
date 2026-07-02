@@ -1,0 +1,154 @@
+"""v0.2 feature tests: enrollment guards, FAR calibration, CLI.
+All model-free (no ONNX download) so they run anywhere CI does."""
+
+import json
+
+import numpy as np
+import pytest
+
+from faceflash.detect import detect_and_align_info
+from faceflash.engine import (FaceFlash, NoFaceFoundError,
+                              _threshold_from_curve, _LFW_FAR_CURVE)
+from faceflash.index import FaceIndex
+
+
+def _gallery(n=1500, n_people=300, seed=7):
+    rng = np.random.default_rng(seed)
+    embs = rng.standard_normal((n, 512)).astype(np.float32)
+    embs /= np.linalg.norm(embs, axis=1, keepdims=True)
+    return embs, [f"person_{i % n_people}" for i in range(n)]
+
+
+# ── enrollment guards ────────────────────────────────────────────────────────
+
+def test_detect_info_reports_center_crop_on_blank_image():
+    blank = np.zeros((200, 300, 3), dtype=np.uint8)
+    face, method = detect_and_align_info(blank)
+    assert method == "center_crop"
+    assert face.shape[0] == face.shape[1] == 200  # center square
+
+
+def test_register_refuses_center_crop(tmp_path, monkeypatch):
+    """A photo with no face raises NoFaceFoundError unless allow_fallback."""
+    from PIL import Image
+    img_path = tmp_path / "noface.jpg"
+    Image.fromarray(np.zeros((200, 200, 3), dtype=np.uint8)).save(img_path)
+
+    ff = FaceFlash()
+    with pytest.raises(NoFaceFoundError):
+        ff.register("Alice", str(img_path))
+    assert len(ff) == 0  # nothing got enrolled
+
+    # allow_fallback enrolls it (embedder stubbed — no model download in CI)
+    class FakeEmbedder:
+        def embed(self, face):
+            v = np.ones(512, dtype=np.float32)
+            return v / np.linalg.norm(v)
+    monkeypatch.setattr(ff, "_embedder", FakeEmbedder())
+    out = ff.register("Alice", str(img_path), allow_fallback=True)
+    assert out["registered"] and out["detection"] == "center_crop"
+    assert len(ff) == 1
+
+
+def test_register_flags_duplicates(tmp_path, monkeypatch):
+    """Registering the same face under a new name reports duplicate_of."""
+    from PIL import Image
+    img_path = tmp_path / "x.jpg"
+    Image.fromarray(np.zeros((200, 200, 3), dtype=np.uint8)).save(img_path)
+
+    rng = np.random.default_rng(0)
+    same_face = rng.standard_normal(512).astype(np.float32)
+    same_face /= np.linalg.norm(same_face)
+
+    ff = FaceFlash()
+
+    class FakeEmbedder:
+        def embed(self, face):
+            return same_face
+    monkeypatch.setattr(ff, "_embedder", FakeEmbedder())
+
+    ff.register("Alice", str(img_path), allow_fallback=True)
+    out = ff.register("Bob", str(img_path), allow_fallback=True)
+    assert out["duplicate_of"]["name"] == "Alice"
+    assert out["duplicate_of"]["confidence"] > 0.99
+
+
+# ── FAR calibration ──────────────────────────────────────────────────────────
+
+def test_threshold_from_curve_interpolates_and_clamps():
+    t_1pct = _threshold_from_curve(_LFW_FAR_CURVE, 0.01)
+    t_01pct = _threshold_from_curve(_LFW_FAR_CURVE, 0.001)
+    t_tiny = _threshold_from_curve(_LFW_FAR_CURVE, 1e-9)
+    assert t_1pct < t_01pct < t_tiny        # stricter FAR -> higher threshold
+    assert t_tiny == 0.35                    # clamps to most conservative
+    assert _threshold_from_curve(_LFW_FAR_CURVE, 0.5) == 0.169  # loose clamp
+    mid = _threshold_from_curve(_LFW_FAR_CURVE, 0.002)
+    assert 0.20 < mid < 0.25                 # interpolated between anchors
+
+
+def test_calibrate_on_gallery_and_persist(tmp_path):
+    embs, labels = _gallery()
+    ff = FaceFlash(index_path=str(tmp_path / "faces.db"))
+    ff.index.add_batch(embs, labels)
+
+    cal = ff.calibrate(n_pairs=20_000)
+    assert cal["n_pairs"] == 20_000
+    fars = [f for f, _ in cal["curve"]]
+    thrs = [t for _, t in cal["curve"]]
+    assert sorted(fars, reverse=True) == fars     # descending FAR
+    assert sorted(thrs) == thrs                   # ascending threshold
+
+    # max_far -> threshold uses the gallery curve, monotonic
+    t_loose = ff._threshold_for_far(0.03)
+    t_strict = ff._threshold_for_far(0.001)
+    assert t_loose < t_strict
+
+    # persists with the .db across reopen
+    ff.index.close()
+    ff2 = FaceFlash(index_path=str(tmp_path / "faces.db"))
+    assert ff2.index.get_calibration() is not None
+    assert abs(ff2._threshold_for_far(0.001) - t_strict) < 1e-9
+    ff2.index.close()
+
+
+def test_calibrate_requires_two_people():
+    ff = FaceFlash()
+    embs, _ = _gallery(n=50)
+    ff.index.add_batch(embs, ["only_one_person"] * 50)
+    with pytest.raises(RuntimeError):
+        ff.calibrate()
+
+
+def test_uncalibrated_falls_back_to_lfw_curve():
+    ff = FaceFlash()
+    assert ff._threshold_for_far(0.001) == pytest.approx(
+        _threshold_from_curve(_LFW_FAR_CURVE, 0.001))
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+def test_cli_names_stats_remove_calibrate(tmp_path, capsys):
+    from faceflash.cli import main
+
+    embs, labels = _gallery()
+    idx = FaceIndex(db_path=str(tmp_path / "faces.db"))
+    idx.add_batch(embs, labels)
+    idx.close()
+
+    db = ["--db", str(tmp_path / "faces.db")]
+
+    assert main(["names"] + db) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["count"] == 1500 and "person_0" in out["names"]
+
+    assert main(["stats"] + db) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["backend"] == "sqlite" and out["count"] == 1500
+
+    assert main(["calibrate", "--pairs", "20000"] + db) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["calibrated"] and len(out["curve"]) >= 3
+
+    assert main(["remove", "--name", "person_3"] + db) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["removed"] == 5 and out["index_size"] == 1495

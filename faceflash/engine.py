@@ -6,12 +6,50 @@ from pathlib import Path
 from typing import Optional
 import time
 
-from faceflash.detect import load_image, detect_and_align
+from faceflash.detect import (load_image, detect_and_align,
+                              detect_and_align_info, detect_faces)
 from faceflash.embed import FaceEmbedder
 from faceflash.index import FaceIndex
 from faceflash.attributes import FaceAttributes
 
 logger = logging.getLogger(__name__)
+
+
+class NoFaceFoundError(ValueError):
+    """Raised when register() finds no face in the image (detection fell all
+    the way back to a center crop). Pass allow_fallback=True to enroll the
+    crop anyway — knowing it indexes whatever happens to be mid-frame."""
+
+
+# Fallback FAR->threshold anchors measured on LFW (15K genuine / 200K impostor
+# pairs, benchmarks/bench_far_frr.py). Used until calibrate() is run on the
+# actual gallery — error rates shift with demographics and photo quality.
+_LFW_FAR_CURVE = [
+    # (false_accept_rate, cosine threshold), descending FAR
+    (0.01,    0.169),
+    (0.00363, 0.20),
+    (0.001,   0.237),
+    (0.00068, 0.25),
+    (0.00012, 0.30),
+    (0.0001,  0.308),
+    (0.00002, 0.35),
+]
+
+
+def _threshold_from_curve(curve, max_far: float) -> float:
+    """Interpolate a cosine threshold for a target FAR (log-FAR domain).
+    Below the calibrated range, returns the most conservative threshold."""
+    pts = sorted(curve, key=lambda p: -p[0])  # descending FAR
+    if max_far >= pts[0][0]:
+        return pts[0][1]
+    if max_far <= pts[-1][0]:
+        return pts[-1][1]
+    for (f_hi, t_lo), (f_lo, t_hi) in zip(pts, pts[1:]):
+        if f_lo <= max_far <= f_hi:
+            span = np.log10(f_hi) - np.log10(f_lo)
+            w = (np.log10(f_hi) - np.log10(max_far)) / span if span else 0.0
+            return float(t_lo + w * (t_hi - t_lo))
+    return pts[-1][1]
 
 
 class FaceFlash:
@@ -48,13 +86,46 @@ class FaceFlash:
             self._attributes = FaceAttributes()
         return self._attributes
 
-    def register(self, name: str, image_path: str) -> dict:
-        """Add a face to the gallery."""
+    def register(self, name: str, image_path: str,
+                 allow_fallback: bool = False,
+                 check_duplicate: bool = True) -> dict:
+        """Add a face to the gallery.
+
+        Raises NoFaceFoundError if no face was detected anywhere in the image
+        (enrolling a blind center crop indexes noise and silently corrupts the
+        gallery). Pass allow_fallback=True to enroll the crop anyway.
+
+        With check_duplicate (default), the new face is searched against the
+        existing gallery first; a strong match under a DIFFERENT name is
+        reported in the result and logged — that's how mislabeled galleries
+        get caught at the door instead of at search time.
+        """
         img = load_image(image_path)
-        face = detect_and_align(img)
+        face, method = detect_and_align_info(img)
+        if method == "center_crop" and not allow_fallback:
+            raise NoFaceFoundError(
+                f"No face detected in {image_path!r}. Enrolling the raw "
+                f"center crop would index noise — fix the photo, or pass "
+                f"allow_fallback=True to enroll it anyway.")
+
         embedding = self.embedder.embed(face)
+
+        result = {"name": name, "registered": True, "detection": method}
+        if check_duplicate and self.index.count > 0:
+            hits = self.index.search(embedding, k=1,
+                                     n_candidates=self.n_candidates)
+            if hits and hits[0][1] >= 0.85 and hits[0][0] != name:
+                other, sim = hits[0][0], hits[0][1]
+                logger.warning(
+                    "register(%r): this face matches existing person %r "
+                    "(similarity %.2f) — possible mislabel or duplicate",
+                    name, other, sim)
+                result["duplicate_of"] = {"name": other,
+                                          "confidence": round(float(sim), 4)}
+
         self.index.add(embedding, name, image_path)
-        return {"name": name, "registered": True, "index_size": self.index.count}
+        result["index_size"] = self.index.count
+        return result
 
     def register_folder(self, folder_path: str, progress: bool = True) -> dict:
         """Bulk register. Expects folder/person_name/photo.jpg structure."""
@@ -91,14 +162,53 @@ class FaceFlash:
         attrs = self.attributes.analyze(face)
         return attrs
 
+    def calibrate(self, n_pairs: int = 100_000, seed: int = 0) -> dict:
+        """Calibrate what a cosine threshold means in false-accept rate on
+        THIS gallery (impostor pairs sampled from the enrolled faces).
+
+        After calling this, `search(..., max_far=0.001)` uses thresholds
+        derived from your own population instead of the shipped LFW anchors.
+        The calibration persists with the index (SQLite meta table / legacy
+        metadata.json). Needs at least 2 distinct enrolled people.
+        """
+        sims = self.index.sample_impostor_sims(n_pairs=n_pairs, seed=seed)
+        fars = [f for f in (0.03, 0.01, 0.003, 0.001, 0.0003, 0.0001)
+                if f * len(sims) >= 10]     # need enough tail mass to estimate
+        curve = [(f, float(np.quantile(sims, 1.0 - f))) for f in fars]
+        calibration = {
+            "curve": curve,
+            "n_pairs": int(len(sims)),
+            "source": "gallery",
+            "calibrated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.index.set_calibration(calibration)
+        return calibration
+
+    def _threshold_for_far(self, max_far: float) -> float:
+        cal = self.index.get_calibration()
+        if cal:
+            return _threshold_from_curve(cal["curve"], max_far)
+        logger.info("max_far=%g using shipped LFW anchors — run calibrate() "
+                    "to measure thresholds on your own gallery", max_far)
+        return _threshold_from_curve(_LFW_FAR_CURVE, max_far)
+
     def search(self, image_path: str, k: int = 1, threshold: float = 0.4,
                n_candidates: Optional[int] = None,
+               max_far: Optional[float] = None,
                with_attributes: bool = False,
                age_filter: Optional[str] = None,
                min_age: Optional[int] = None,
                max_age: Optional[int] = None) -> dict:
-        """Identify a face. Returns matches above threshold with timing info."""
+        """Identify a face. Returns matches above threshold with timing info.
+
+        max_far: set the decision threshold by target false-accept rate
+        instead of a raw cosine value — e.g. max_far=0.001 means "at most
+        1 in 1,000 impostor queries may match". Overrides `threshold`.
+        Run calibrate() once to derive thresholds from your own gallery.
+        """
         start = time.perf_counter()
+        if max_far is not None:
+            threshold = self._threshold_for_far(max_far)
 
         img = load_image(image_path)
         face = detect_and_align(img)
@@ -142,18 +252,29 @@ class FaceFlash:
 
         result = {
             "matches": matches,
+            "threshold": round(float(threshold), 4),
             "time_ms": round(total_time * 1000, 2),
             "embed_time_ms": round(embed_time * 1000, 2),
             "search_time_ms": round(search_time * 1000, 2),
             "index_size": self.index.count,
         }
+        if max_far is not None:
+            result["max_far"] = max_far
         if query_attrs:
             result["attributes"] = query_attrs
         return result
 
-    def verify(self, image1: str, image2: str) -> dict:
-        """Check if two images are the same person."""
+    def verify(self, image1: str, image2: str,
+               threshold: float = 0.4,
+               max_far: Optional[float] = None) -> dict:
+        """Check if two images are the same person.
+
+        max_far sets the decision threshold by false-accept rate (see
+        search()); it overrides `threshold`.
+        """
         start = time.perf_counter()
+        if max_far is not None:
+            threshold = self._threshold_for_far(max_far)
 
         img1 = load_image(image1)
         face1 = detect_and_align(img1)
@@ -166,11 +287,48 @@ class FaceFlash:
         similarity = float(np.dot(emb1, emb2))
         total_time = time.perf_counter() - start
 
-        return {
-            "match": similarity > 0.4,
+        out = {
+            "match": similarity >= threshold,
             "confidence": round(similarity, 4),
+            "threshold": round(float(threshold), 4),
             "time_ms": round(total_time * 1000, 2),
         }
+        if max_far is not None:
+            out["max_far"] = max_far
+        return out
+
+    def search_all(self, image_path: str, k: int = 1, threshold: float = 0.4,
+                   n_candidates: Optional[int] = None,
+                   max_far: Optional[float] = None) -> dict:
+        """Identify EVERY face in an image (group photos, camera frames).
+
+        Returns one entry per detected face, in detection order:
+        {"faces": [{"face": 0, "matches": [...]}, ...], "time_ms": ...}
+        """
+        start = time.perf_counter()
+        if max_far is not None:
+            threshold = self._threshold_for_far(max_far)
+
+        img = load_image(image_path)
+        crops = detect_faces(img)
+        faces = []
+        for fi, crop in enumerate(crops):
+            embedding = self.embedder.embed(crop)
+            results = self.index.search(
+                embedding, k=k, n_candidates=n_candidates or self.n_candidates)
+            matches = [{"name": lbl, "confidence": round(float(sim), 4), "index": idx}
+                       for lbl, sim, idx in results if sim >= threshold]
+            faces.append({"face": fi, "matches": matches})
+
+        out = {
+            "faces": faces,
+            "n_faces": len(faces),
+            "threshold": round(float(threshold), 4),
+            "time_ms": round((time.perf_counter() - start) * 1000, 2),
+        }
+        if max_far is not None:
+            out["max_far"] = max_far
+        return out
 
     def save(self, path: str):
         self.index.save(path)

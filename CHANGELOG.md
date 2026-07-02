@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [0.2.0] - 2026-07-02
 
 ### Added
+- **FAR-calibrated thresholds.** `search(..., max_far=0.001)` /
+  `verify(..., max_far=...)` set the decision threshold as a target
+  false-accept rate instead of a raw cosine value. `calibrate()` measures
+  impostor scores on the actual enrolled gallery and persists the curve with
+  the index; uncalibrated indexes fall back to LFW-measured anchors.
+- **Enrollment integrity guards.** `register()` raises `NoFaceFoundError`
+  when detection found no face (previously it silently indexed a center crop
+  of the image — noise in the gallery); `allow_fallback=True` restores the
+  old behavior. It also searches the gallery before inserting and reports
+  `duplicate_of` when the new face strongly matches an existing person under
+  a different name.
+- **`search_all()`** — identify every face in an image (group photos,
+  camera frames), one match list per detected face.
+- **`faceflash` CLI** (`pipx install faceflash`): register / register-folder /
+  search / search-all / verify / calibrate / remove / names / stats, all JSON
+  output, plus `faceflash serve` — a zero-dependency REST API over the index
+  (POST image bytes to /search, /search_all, /register; GET /stats, /names;
+  DELETE /person/<name>).
+- Haar-cascade fallback now survives broken/partial cv2 installs (degrades
+  to center crop instead of crashing register()).
 - **SQLite backend — single-file, write-through, streaming insertion.**
   `FaceFlash("faces.db")` / `FaceIndex(db_path="faces.db")` opens (or creates)
   a single .db file: every add is a transactional INSERT (WAL, crash-safe),

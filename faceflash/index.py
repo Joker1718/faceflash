@@ -199,7 +199,10 @@ class FaceIndex:
         """Open (or create) a SQLite-backed index and load the code arena."""
         self._db_path = str(path)
         is_new = not Path(self._db_path).exists() or Path(self._db_path).stat().st_size == 0
-        self._db = sqlite3.connect(self._db_path)
+        # check_same_thread=False: the CLI's REST server calls into the index
+        # from handler threads. All callers that share a connection across
+        # threads must serialize access (faceflash.cli does, with one lock).
+        self._db = sqlite3.connect(self._db_path, check_same_thread=False)
         if is_new:
             # A face row is ~2.1 KB (embedding blob dominates). Default 4 KB
             # pages fit ONE row each — half the file would be padding. 16 KB
@@ -675,6 +678,7 @@ class FaceIndex:
                 "paths": self.paths,
                 "count": self.count,
                 "pca_fitted": self._pca_fitted,
+                "far_calibration": getattr(self, "_calibration", None),
             }, f)
         # Persist quantizer if fitted
         if self._pca_fitted:
@@ -706,6 +710,7 @@ class FaceIndex:
         self.paths = meta["paths"]
         self.count = meta["count"]
         self._pca_fitted = meta.get("pca_fitted", False)
+        self._calibration = meta.get("far_calibration")
         # Load quantizer if it was persisted
         quantizer_path = p / "quantizer"
         if quantizer_path.exists() and self._pca_fitted:
@@ -769,6 +774,62 @@ class FaceIndex:
         """Return the sorted list of distinct labels currently in the index."""
         self._flush_pending()
         return sorted(set(self.labels))
+
+    # ─────────────────────────────────────────────────────────────────────
+    # FAR calibration support
+    # ─────────────────────────────────────────────────────────────────────
+
+    def sample_impostor_sims(self, n_pairs: int = 100_000, max_rows: int = 5000,
+                             seed: int = 0) -> np.ndarray:
+        """Cosine similarities of random impostor pairs (different labels)
+        drawn from the enrolled gallery. Used to calibrate what a cosine
+        threshold means in false-accept rate ON THIS population.
+
+        Fetches at most `max_rows` embeddings (≈10 MB) and forms pairs among
+        them, so it stays cheap even at 1M faces.
+        """
+        self._flush_pending()
+        if len(set(self.labels)) < 2:
+            raise RuntimeError("Calibration needs at least 2 distinct people")
+
+        rng = np.random.default_rng(seed)
+        n = self.count
+        rows = (np.sort(rng.choice(n, size=max_rows, replace=False))
+                if n > max_rows else np.arange(n))
+        embs = self._embeddings_for(rows) if self._db is not None \
+            else self.float_vectors[rows]
+        embs = embs / (np.linalg.norm(embs, axis=1, keepdims=True) + 1e-12)
+        lbls = np.array([self.labels[i] for i in rows])
+
+        sims = []
+        want = n_pairs
+        while len(sims) < want:
+            a = rng.integers(0, len(rows), size=want)
+            b = rng.integers(0, len(rows), size=want)
+            keep = lbls[a] != lbls[b]
+            sims.extend(np.einsum('ij,ij->i', embs[a[keep]], embs[b[keep]]).tolist())
+        return np.array(sims[:want], dtype=np.float32)
+
+    def set_calibration(self, calibration: dict):
+        """Persist a FAR->threshold curve (DB meta table, or in-memory +
+        metadata.json for the legacy format)."""
+        self._calibration = calibration
+        if self._db is not None:
+            self._db.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                ("far_calibration", json.dumps(calibration)))
+            self._db.commit()
+
+    def get_calibration(self) -> Optional[dict]:
+        if getattr(self, "_calibration", None) is not None:
+            return self._calibration
+        if self._db is not None:
+            row = self._db.execute(
+                "SELECT value FROM meta WHERE key='far_calibration'").fetchone()
+            if row:
+                self._calibration = json.loads(row[0])
+                return self._calibration
+        return None
 
     def remove(self, label: str) -> int:
         """Remove every face with `label` from the index. Returns the count removed.
