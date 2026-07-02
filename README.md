@@ -32,7 +32,7 @@ ff.verify("photo1.jpg", "photo2.jpg")  # 1:1 — same person?
 ff.remove("Bob")                       # GDPR / right-to-be-forgotten
 ```
 
-There's also a batch path (`ff.index.search_batch(embeddings, k=1)`) for bulk dedup, watchlists, and video frames — roughly 8× the throughput of one-at-a-time at 100K.
+There's also a batch path (`ff.index.search_batch(embeddings, k=1)`) for bulk dedup, watchlists, and video frames — roughly 11× the throughput of one-at-a-time at 100K.
 
 <div align="center">
 
@@ -46,97 +46,121 @@ There's also a batch path (`ff.index.search_batch(embeddings, k=1)`) for bulk de
 
 All FaceFlash numbers use the default 512-bit config, measured on MS1MV2 embeddings with an AMD EPYC 9355 (AVX-512). Recall@1 = returns the same nearest neighbor as exact brute-force cosine (FAISS-Flat ground truth). That's a statement about the compression being lossless for retrieval — not about ArcFace being perfect; embedding-model limits (pose, occlusion, age) are upstream.
 
-| | FaceFlash | HNSWLIB | USearch | FAISS-Flat |
+| | FaceFlash | HNSWLIB (ef=128) | USearch (exp=256) | FAISS-Flat |
 |---|---|---|---|---|
-| **Recall@1** | **100%** | 100% | 99.5% | 100% (ground truth) |
-| **Index RAM @ 100K** | **6.1 MB** | 293 MB | 254 MB | 195 MB |
-| **Index RAM @ 1M** | **61 MB** | 2,930 MB | 2,539 MB | 1,953 MB |
-| **Single-query @ 100K** | **0.30ms** | 0.60ms | 0.17ms | 4.90ms |
-| **Single-query @ 1M** | 2.95ms | 0.66ms | — | — |
+| **Recall@1** | **100%** | 100% | 99.1–99.9% | 100% (ground truth) |
+| **Index RAM @ 100K** | **6.1 MB** | 222 MB | 112 MB | 195 MB |
+| **Index RAM @ 1M** | **61 MB** | 2,217 MB | 1,118 MB | 1,953 MB |
+| **Single-query @ 100K** | **0.40ms** | 0.60ms | 0.60ms | 4.99ms |
+| **Single-query @ 1M** | 3.40ms | 0.65ms | 0.94ms | 51.6ms |
 
-Two honesty notes on this table:
+Notes on this table:
 
-- Competitor memory was *estimated* (vectors + overhead, HNSW ≈ 1.5× raw). The benchmark now measures saved-index file sizes instead, and the estimates run high — measured at 100K, HNSW is 222 MB and USearch is 112 MB. Measured numbers land here after the next full run; until then treat competitor memory as an upper bound.
-- The 1M scale is tiled from 645K real embeddings. Recall scoring is tie-aware (an equidistant duplicate counts as correct for every method), so tiling doesn't favor anyone.
+- All memory is *measured* (saved-index file size — HNSWLIB `save_index`, USearch `save`, FAISS `write_index`), not estimated. Earlier published versions used estimates that ran ~30% high for competitors.
+- Competitors are tuned, not defaults: HNSWLIB gets an ef sweep and USearch an expansion sweep; the table shows each at its best swept recall.
+- The 1M scale is tiled from 644K real embeddings (the smaller scales are not). Recall scoring is tie-aware — an equidistant duplicate counts as correct for every method — so tiling doesn't favor anyone.
+- FaceFlash's latency here reranks from *disk* just fine: the mmap-rerank row measured 3.26ms at 1M on NVMe, indistinguishable from RAM-resident floats.
 
 | Scale | Recall@1 | Single-query | Batched QPS | Index RAM |
 |---|---|---|---|---|
-| 100K | 100% | 0.30ms | 27,661 | 6.1 MB |
-| 200K | 100% | 0.57ms | 19,930 | 12.2 MB |
-| 300K | 100% | 0.84ms | 15,147 | 18.3 MB |
-| 500K | 100% | 1.45ms | 10,337 | 30.5 MB |
-| 1M | 100% | 2.95ms | 5,403 | 61 MB |
+| 100K | 100% | 0.40ms | 28,792 | 6.1 MB |
+| 200K | 100% | 0.70ms | 18,422 | 12.2 MB |
+| 300K | 100% | 1.20ms | 13,858 | 18.3 MB |
+| 500K | 100% | 1.70ms | 9,091 | 30.5 MB |
+| 1M | 100% | 3.40ms | 5,057 | 61 MB |
 
-Up to ~200K the binary scan is faster per query than HNSW because the codes fit in cache. From ~300K up, HNSW's O(log N) graph wins on single-query latency while FaceFlash keeps the smaller footprint. A 256-bit config halves the index at the same recall for about 2× the single-query latency.
+At 100K the scan is faster per query than HNSW (0.40ms vs 0.60ms) because the codes fit in cache; at 200K they're roughly tied; from ~300K up HNSW's O(log N) graph wins on single-query latency while FaceFlash keeps the ~36× smaller footprint. A 256-bit config halves the index at the same recall for about 2× the single-query latency.
 
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/raghavenderreddygrudhanti/faceflash/main/docs/figures/chart_memory_scale.png" width="760" alt="Memory comparison at 500K faces"/>
+<img src="https://raw.githubusercontent.com/raghavenderreddygrudhanti/faceflash/main/docs/figures/chart_memory_bar.png" width="760" alt="Measured index memory at 100K faces"/>
 
-<sub>Index memory at 500K: the gap is float-vs-binary storage, not a smarter index.</sub>
+<sub>Measured index memory at 100K (256-bit config): the gap is float-vs-binary storage, not a smarter index.</sub>
 
 </div>
 
 <details>
-<summary>Per-scale benchmark tables (all methods)</summary>
+<summary>Per-scale benchmark tables (all methods, measured 2026-07-02)</summary>
 
 ### 100K Faces (6,939 identities)
 
 | Method | Recall@1 | Latency | QPS | Memory |
 |---|---|---|---|---|
-| FaceFlash (batched) | 100% | 0.036ms | 27,661 | 6.1 MB |
-| FaceFlash (512b/200c) | 100% | 0.30ms | 3,310 | 6.1 MB |
-| FaceFlash (512b/100c) | 100% | 0.43ms | 2,344 | 6.1 MB |
-| HNSWLIB (ef=128) | 100% | 0.60ms | 1,671 | 293 MB |
-| HNSWLIB batched | 100% | 0.172ms | 5,813 | 293 MB |
-| USearch batched | 99.5% | 0.007ms | 137,264 | 254 MB |
-| USearch | 99.5% | 0.17ms | -- | 254 MB |
-| ScaNN | 98.3% | 0.10ms | -- | 12 MB |
-| FAISS-Flat (exact) | 100% | 4.90ms | 204 | 195 MB |
+| FaceFlash (512b/100c, batched) | 100.0% | 0.035ms | 28,792 | 6.1 MB |
+| FaceFlash (512b/100c) | 100.0% | 0.398ms | 2,512 | 6.1 MB |
+| FaceFlash (512b/100c, mmap rerank) | 100.0% | 0.327ms | 3,059 | 6.1 MB |
+| FAISS-BinaryFlat + rerank | 100.0% | 0.195ms | 5,135 | 6.1 MB |
+| FAISS-BinaryHNSW + rerank | 95.8% | 0.066ms | 15,202 | 32.1 MB |
+| HNSWLIB (ef=128) | 100.0% | 0.604ms | 1,656 | 221.7 MB |
+| HNSWLIB (ef=128, batched) | 100.0% | 0.175ms | 5,721 | 221.7 MB |
+| USearch (exp=256) | 99.1% | 0.599ms | 1,670 | 111.8 MB |
+| USearch (exp=128, batched) | 99.5% | 0.011ms | 88,115 | 111.8 MB |
+| FAISS-Flat (exact) | 100.0% | 4.987ms | 201 | 195.3 MB |
+| ScaNN (leaves=316) | 98.4% | 0.104ms | 9,620 | 12.2 MB |
 
 ### 200K Faces (13,749 identities)
 
 | Method | Recall@1 | Latency | QPS | Memory |
 |---|---|---|---|---|
-| FaceFlash (batched) | 100% | 0.050ms | 19,930 | 12.2 MB |
-| FaceFlash (512b/200c) | 100% | 0.57ms | 1,751 | 12.2 MB |
-| HNSWLIB (ef=128) | 99.9% | 0.65ms | 1,531 | 586 MB |
-| HNSWLIB batched | 99.9% | 0.378ms | 2,646 | 586 MB |
-| USearch batched | 99.1% | 0.008ms | 121,660 | 508 MB |
-| ScaNN | 97.2% | 0.19ms | -- | 24 MB |
+| FaceFlash (512b/100c, batched) | 100.0% | 0.054ms | 18,422 | 12.2 MB |
+| FaceFlash (512b/100c) | 100.0% | 0.704ms | 1,420 | 12.2 MB |
+| FaceFlash (512b/100c, mmap rerank) | 100.0% | 0.636ms | 1,573 | 12.2 MB |
+| FAISS-BinaryFlat + rerank | 100.0% | 0.343ms | 2,915 | 12.2 MB |
+| FAISS-BinaryHNSW + rerank | 91.6% | 0.075ms | 13,345 | 64.1 MB |
+| HNSWLIB (ef=128) | 99.6% | 0.657ms | 1,523 | 443.3 MB |
+| HNSWLIB (ef=128, batched) | 99.7% | 0.178ms | 5,608 | 443.3 MB |
+| USearch (exp=256) | 99.6% | 0.681ms | 1,468 | 223.7 MB |
+| USearch (exp=128, batched) | 99.2% | 0.044ms | 22,714 | 223.7 MB |
+| FAISS-Flat (exact) | 100.0% | 9.921ms | 101 | 390.6 MB |
+| ScaNN (leaves=447) | 97.2% | 0.189ms | 5,298 | 24.4 MB |
 
 ### 300K Faces (20,615 identities)
 
 | Method | Recall@1 | Latency | QPS | Memory |
 |---|---|---|---|---|
-| FaceFlash (batched) | 100% | 0.066ms | 15,147 | 18.3 MB |
-| FaceFlash (512b/200c) | 100% | 0.84ms | 1,187 | 18.3 MB |
-| HNSWLIB (ef=128) | 99.9% | 0.66ms | 1,510 | 879 MB |
-| HNSWLIB batched | 99.7% | 0.269ms | 3,715 | 879 MB |
-| USearch batched | 98.7% | 0.014ms | 73,383 | 762 MB |
-| ScaNN | 97.8% | 0.28ms | -- | 37 MB |
+| FaceFlash (512b/100c, batched) | 100.0% | 0.072ms | 13,858 | 18.3 MB |
+| FaceFlash (512b/100c) | 100.0% | 1.200ms | 833 | 18.3 MB |
+| FaceFlash (512b/100c, mmap rerank) | 100.0% | 0.943ms | 1,060 | 18.3 MB |
+| FAISS-BinaryFlat + rerank | 100.0% | 0.490ms | 2,041 | 18.3 MB |
+| FAISS-BinaryHNSW + rerank | 86.3% | 0.087ms | 11,547 | 96.2 MB |
+| HNSWLIB (ef=128) | 99.8% | 0.794ms | 1,260 | 665.0 MB |
+| HNSWLIB (ef=128, batched) | 99.7% | 0.177ms | 5,664 | 665.0 MB |
+| USearch (exp=256) | 99.6% | 0.806ms | 1,241 | 335.4 MB |
+| USearch (exp=128, batched) | 99.4% | 0.015ms | 64,733 | 335.4 MB |
+| FAISS-Flat (exact) | 100.0% | 14.406ms | 69 | 585.9 MB |
+| ScaNN (leaves=547) | 97.8% | 0.271ms | 3,691 | 36.6 MB |
 
 ### 500K Faces (34,328 identities)
 
 | Method | Recall@1 | Latency | QPS | Memory |
 |---|---|---|---|---|
-| FaceFlash (batched) | 100% | 0.097ms | 10,337 | 30.5 MB |
-| FaceFlash (512b/200c) | 100% | 1.45ms | 692 | 30.5 MB |
-| HNSWLIB (ef=128) | 100% | 0.71ms | 1,416 | 1,465 MB |
-| HNSWLIB batched | 99.9% | 0.179ms | 5,577 | 1,465 MB |
-| USearch batched | 98.4% | 0.013ms | 76,150 | 1,270 MB |
-| ScaNN | 97.6% | 0.45ms | -- | 61 MB |
+| FaceFlash (512b/100c, batched) | 100.0% | 0.110ms | 9,091 | 30.5 MB |
+| FaceFlash (512b/100c) | 100.0% | 1.698ms | 589 | 30.5 MB |
+| FaceFlash (512b/100c, mmap rerank) | 100.0% | 1.657ms | 603 | 30.5 MB |
+| FAISS-BinaryFlat + rerank | 100.0% | 0.865ms | 1,157 | 30.5 MB |
+| FAISS-BinaryHNSW + rerank | 78.0% | 0.146ms | 6,843 | 160.3 MB |
+| HNSWLIB (ef=128) | 99.8% | 0.723ms | 1,383 | 1,108.3 MB |
+| HNSWLIB (ef=128, batched) | 99.8% | 0.165ms | 6,047 | 1,108.3 MB |
+| USearch (exp=256) | 99.7% | 0.834ms | 1,200 | 559.0 MB |
+| USearch (exp=128, batched) | 99.6% | 0.020ms | 49,647 | 559.0 MB |
+| FAISS-Flat (exact) | 100.0% | 24.301ms | 41 | 976.6 MB |
+| ScaNN (leaves=707) | 97.6% | 0.438ms | 2,285 | 61.0 MB |
 
-### 1M Faces (44,291 identities)
+### 1M Faces (44,291 identities) — tiled from 644K real embeddings
 
 | Method | Recall@1 | Latency | QPS | Memory |
 |---|---|---|---|---|
-| FaceFlash (batched) | 100% | 0.185ms | 5,403 | 61 MB |
-| FaceFlash (512b/100c) | 100% | 2.92ms | 342 | 61 MB |
-| HNSWLIB (ef=128) | 100% | 0.66ms | 1,523 | 2,930 MB |
-| HNSWLIB batched | 100% | 0.178ms | 5,621 | 2,930 MB |
-| USearch batched | 94.1% | 0.013ms | 77,266 | 2,539 MB |
-| ScaNN | 98.2% | 0.86ms | -- | 122 MB |
+| FaceFlash (512b/100c, batched) | 100.0% | 0.198ms | 5,057 | 61.0 MB |
+| FaceFlash (512b/100c) | 100.0% | 3.402ms | 294 | 61.0 MB |
+| FaceFlash (512b/100c, mmap rerank) | 100.0% | 3.257ms | 307 | 61.0 MB |
+| FAISS-BinaryFlat + rerank | 100.0% | 1.711ms | 585 | 61.0 MB |
+| FAISS-BinaryHNSW + rerank | 61.7% | 0.127ms | 7,894 | 320.6 MB |
+| HNSWLIB (ef=128) | 100.0% | 0.650ms | 1,539 | 2,216.7 MB |
+| HNSWLIB (ef=128, batched) | 100.0% | 0.175ms | 5,698 | 2,216.7 MB |
+| USearch (exp=256) | 99.9% | 0.943ms | 1,061 | 1,118.3 MB |
+| USearch (exp=128, batched) | 98.6% | 0.017ms | 57,457 | 1,118.3 MB |
+| FAISS-Flat (exact) | 100.0% | 51.596ms | 19 | 1,953.1 MB |
+| ScaNN (leaves=1000) | 98.0% | 0.835ms | 1,198 | 122.1 MB |
 
 </details>
 
@@ -168,11 +192,14 @@ The equal-error rate is ~1.0% at threshold ~0.17. The 0.4 default is deliberatel
 
 The compression. Two benchmarks prove it: `bench_compression_isolation.py` runs the same PCA+ITQ codes through FaceFlash's Rust kernel and FAISS `IndexBinaryFlat` with identical reranking — same recall, so the kernel does nothing accuracy-wise. And `bench_ann_comparison.py` includes `IndexBinaryFlat` and `IndexBinaryHNSW` rows over the same 64-byte codes, so the compression win and the search-structure cost are separate columns you can read off.
 
-One result from that worth knowing: binary-HNSW over the same codes is much faster than the linear scan but drops recall (92% vs 99.5%+ at 100K, same top-100 rerank) — the graph over Hamming space misses candidates the exhaustive scan finds. That, not the SIMD kernel, is the actual argument for scanning.
+Two results from that worth knowing (measured, same codes, same top-100 rerank):
+
+- **Binary-HNSW sheds recall as the database grows: 95.8% at 100K → 78.0% at 500K → 61.7% at 1M**, while the exhaustive scan holds 100% at every scale. The graph over Hamming space increasingly misses candidates the scan finds. (500K is untiled real data, so this isn't a tiling artifact.) That, not the SIMD kernel, is the argument for scanning.
+- **FAISS `IndexBinaryFlat` is actually ~2× faster than FaceFlash's Rust kernel single-query** (0.195ms vs 0.398ms at 100K; 1.71ms vs 3.40ms at 1M) at identical recall. FAISS's binary scan is simply better optimized. FaceFlash's speed edge is the batched path (0.198ms/query effective at 1M) — for single queries, the honest statement is that the win is the compression and the packaging, not the kernel.
 
 ### Methodology, briefly
 
-MS1MV2 (645,019 embeddings, 44,291 identities), ArcFace w600k_r50, L2-normalized. Ground truth is exact brute-force cosine. Single-query rows are single-threaded; batched rows use all cores on both sides. Memory is measured from saved-index file size where the library supports it (HNSWLIB `save_index`, USearch `save`, FAISS `write_index`); each result row's `memory_note` says whether it was measured or estimated. A dedicated mmap-rerank row measures FaceFlash latency with floats on disk — the mode the RAM number describes. `bash scripts/runpod_ms1m.sh` reproduces everything end-to-end.
+All published numbers are from one full RunPod run (2026-07-02) on MS1MV2 (645,019 embeddings, 44,291 identities), ArcFace w600k_r50, L2-normalized. Ground truth is exact brute-force cosine. Single-query rows are single-threaded; batched rows use all cores on both sides. Memory is measured from saved-index file size where the library supports it (HNSWLIB `save_index`, USearch `save`, FAISS `write_index`); each result row's `memory_note` says whether it was measured or estimated. A dedicated mmap-rerank row measures FaceFlash latency with floats on disk — the mode the RAM number describes. `bash scripts/runpod_ms1m.sh` reproduces everything end-to-end.
 
 ---
 
@@ -187,8 +214,8 @@ Needs a [Rust toolchain](https://rustup.rs) to compile the AVX-512/NEON backend;
 ## When to use it
 
 - Edge / mobile / IoT — megabytes of RAM instead of hundreds; floats stay on disk
-- Multi-tenant servers — 100 galleries × 61 MB = 6 GB of RAM (plus ~200 GB of float stores on disk); HNSW needs its ~290 GB *in RAM*
-- 10K–200K galleries — the sweet spot where the scan beats HNSW on latency *and* memory
+- Multi-tenant servers — 100 galleries × 61 MB = 6 GB of RAM (plus ~200 GB of float stores on disk); HNSW needs its ~220 GB *in RAM*
+- 10K–150K galleries — the sweet spot where the scan beats HNSW on latency *and* memory (they tie at ~200K)
 - Offline / air-gapped — a Raspberry Pi or cheap VPS, no GPU, no network
 
 Use HNSW instead when you're past ~500K faces and need sub-millisecond single queries, when RAM isn't your constraint, or when you want years of production hardening.
@@ -225,10 +252,10 @@ rust/src/lib.rs       AVX-512 VPOPCNTDQ / NEON / scalar POPCNT kernels
 
 ## Limitations
 
-- Single-query latency at 1M+ is O(N); HNSW is ~4.4× faster there. The batched path ties.
+- Single-query latency at 1M+ is O(N); HNSW is ~5× faster there (0.65ms vs 3.40ms). The batched path ties. FAISS IndexBinaryFlat also scans the same codes ~2× faster single-query.
 - The RAM number is not the storage number: 61 MB @ 1M in RAM, ~2 GB of floats on disk for reranking.
 - Building the index holds all floats in RAM; the savings apply after `save()`/`load()`, when floats move to mmap'd disk.
-- The rerank pages ~100 float rows from disk per query — measured at ~0.2ms over RAM-resident rerank at 100K (warm cache); slow storage adds more.
+- The rerank pages ~100 float rows from disk per query — on NVMe this measured indistinguishable from RAM-resident floats (3.26ms vs 3.40ms at 1M); slow storage adds more.
 - The single-popcount kernel needs Ice Lake / Zen 4+ / EPYC 9004+; older CPUs fall back to AVX2 or scalar automatically.
 - The recall result is specific to face embeddings (low-rank). Don't expect it on arbitrary vectors.
 
@@ -243,7 +270,7 @@ python benchmarks/bench_ann_comparison.py --scales 100K --queries 500
 bash scripts/runpod_ms1m.sh
 ```
 
-Or the [Colab notebook](https://colab.research.google.com/github/raghavenderreddygrudhanti/faceflash/blob/main/examples/faceflash_reproduce_colab.ipynb) — 5 minutes on a free CPU, no tokens. It runs a NumPy fallback (no Rust on Colab), so recall shows ~98–99% instead of 100% due to `argpartition` tie-breaking; memory numbers are identical.
+Or the [Colab notebook](https://colab.research.google.com/github/raghavenderreddygrudhanti/faceflash/blob/main/examples/faceflash_reproduce_colab.ipynb) — 5 minutes on a free CPU, no tokens. It runs a NumPy fallback (no Rust on Colab) that uses the same deterministic (distance, index) tie-breaking as the Rust kernel, so recall matches the table above; memory numbers are hardware-independent either way.
 
 ## Contributing
 
