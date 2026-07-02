@@ -113,22 +113,53 @@ unsafe fn hamming_avx512_vpopcntdq(a: &[u8], b: &[u8]) -> u32 {
 }
 
 /// NEON Hamming distance: processes 16 bytes (128 bits) per iteration.
-/// ~2x faster than scalar u64 POPCNT on ARM (Apple M-series, Raspberry Pi 4+).
+/// Popcounts accumulate in u8 lanes across blocks (each block adds at most 8
+/// per lane, so up to 31 blocks = 496 bytes cannot overflow) with a SINGLE
+/// cross-lane reduction at the end — the previous version paid a horizontal
+/// `vaddlvq_u8` per block, which was the serial bottleneck of the whole scan.
+/// Fixed 64-byte (512-bit) NEON Hamming: four independent XOR+CNT chains, a
+/// two-level pairwise add tree, one cross-lane reduction. The default code
+/// size always hits this — fully unrolled, no loop, maximum ILP.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn hamming_neon_64(a: *const u8, b: *const u8) -> u32 {
+    use std::arch::aarch64::*;
+    let c0 = vcntq_u8(veorq_u8(vld1q_u8(a), vld1q_u8(b)));
+    let c1 = vcntq_u8(veorq_u8(vld1q_u8(a.add(16)), vld1q_u8(b.add(16))));
+    let c2 = vcntq_u8(veorq_u8(vld1q_u8(a.add(32)), vld1q_u8(b.add(32))));
+    let c3 = vcntq_u8(veorq_u8(vld1q_u8(a.add(48)), vld1q_u8(b.add(48))));
+    let s = vaddq_u8(vaddq_u8(c0, c1), vaddq_u8(c2, c3));
+    vaddlvq_u8(s) as u32
+}
+
 #[cfg(target_arch = "aarch64")]
 unsafe fn hamming_neon(a: &[u8], b: &[u8]) -> u32 {
     use std::arch::aarch64::*;
-    let mut dist: u32 = 0;
     let len = a.len();
+    if len == 64 {
+        return hamming_neon_64(a.as_ptr(), b.as_ptr());
+    }
+    let mut dist: u32 = 0;
     let mut i = 0;
 
-    while i + 16 <= len {
-        let va = vld1q_u8(a.as_ptr().add(i));
-        let vb = vld1q_u8(b.as_ptr().add(i));
-        let xor = veorq_u8(va, vb);
-        let cnt = vcntq_u8(xor);
-        dist += vaddlvq_u8(cnt) as u32;
-
-        i += 16;
+    if len / 16 <= 31 {
+        // Fast path: all real code sizes (16-64 bytes) land here.
+        let mut acc = vdupq_n_u8(0);
+        while i + 16 <= len {
+            let va = vld1q_u8(a.as_ptr().add(i));
+            let vb = vld1q_u8(b.as_ptr().add(i));
+            acc = vaddq_u8(acc, vcntq_u8(veorq_u8(va, vb)));
+            i += 16;
+        }
+        dist += vaddlvq_u8(acc) as u32;
+    } else {
+        // Oversized inputs: reduce per block to avoid u8 lane overflow.
+        while i + 16 <= len {
+            let va = vld1q_u8(a.as_ptr().add(i));
+            let vb = vld1q_u8(b.as_ptr().add(i));
+            dist += vaddlvq_u8(vcntq_u8(veorq_u8(va, vb))) as u32;
+            i += 16;
+        }
     }
 
     while i + 8 <= len {
@@ -254,6 +285,61 @@ fn hamming_distances_parallel<'py>(
     PyArray1::from_vec_bound(py, distances)
 }
 
+/// Bounded top-k accumulator: a max-heap of size k over (distance, index)
+/// tuples — tuple ordering keeps the deterministic tie-breaking that matches
+/// the NumPy fallback (hamming_topk_numpy).
+///
+/// This replaces the old full materialization (a Vec of N tuples, 16 MB at
+/// 1M rows, allocated per query, plus a second selection pass). The scan now
+/// writes nothing per row in the common case: one branch against the current
+/// k-th best, and the heap is only touched when a row actually qualifies.
+struct TopK {
+    k: usize,
+    heap: std::collections::BinaryHeap<(u32, u64)>,
+}
+
+impl TopK {
+    #[inline]
+    fn new(k: usize) -> Self {
+        TopK { k, heap: std::collections::BinaryHeap::with_capacity(k + 1) }
+    }
+
+    #[inline]
+    fn push(&mut self, d: u32, i: u64) {
+        if self.heap.len() < self.k {
+            self.heap.push((d, i));
+        } else if let Some(&worst) = self.heap.peek() {
+            if (d, i) < worst {
+                self.heap.pop();
+                self.heap.push((d, i));
+            }
+        }
+    }
+
+    /// Current k-th best distance — rows above this can be skipped cheaply.
+    #[inline]
+    fn worst_dist(&self) -> u32 {
+        if self.heap.len() < self.k {
+            u32::MAX
+        } else {
+            self.heap.peek().map(|&(d, _)| d).unwrap_or(u32::MAX)
+        }
+    }
+
+    /// Merge another TopK into this one (for parallel reduction).
+    fn merge(mut self, other: TopK) -> TopK {
+        for (d, i) in other.heap {
+            self.push(d, i);
+        }
+        self
+    }
+
+    /// Ascending (distance, index) order — same output as the old sort.
+    fn into_sorted_indices(self) -> Vec<u64> {
+        self.heap.into_sorted_vec().into_iter().map(|(_, i)| i).collect()
+    }
+}
+
 #[pyfunction]
 fn hamming_topk<'py>(
     py: Python<'py>,
@@ -265,18 +351,37 @@ fn hamming_topk<'py>(
     let db = database.as_array();
     let n = db.shape()[0];
     let k = k.min(n);
+    if k == 0 {
+        return PyArray1::from_vec_bound(py, Vec::new());
+    }
 
-    let mut dist_idx: Vec<(u32, usize)> = (0..n)
-        .map(|i| (hamming(db.row(i).to_slice().unwrap(), q), i))
-        .collect();
+    let mut top = TopK::new(k);
+    let mut worst = u32::MAX;
+    // Iterate the flat buffer with chunks_exact instead of ndarray row
+    // extraction — removes per-row bounds/stride work (the same reason FAISS
+    // scans a raw pointer with a fixed-size Hamming computer).
+    if let Ok(flat) = database.as_slice() {
+        let row_bytes = q.len();
+        for (i, row) in flat.chunks_exact(row_bytes).enumerate() {
+            let d = hamming(row, q);
+            // Fast reject on distance alone; ties at the boundary still go
+            // through push(), where full (d, i) ordering decides.
+            if d <= worst {
+                top.push(d, i as u64);
+                worst = top.worst_dist();
+            }
+        }
+    } else {
+        for i in 0..n {
+            let d = hamming(db.row(i).to_slice().unwrap(), q);
+            if d <= worst {
+                top.push(d, i as u64);
+                worst = top.worst_dist();
+            }
+        }
+    }
 
-    // Plain tuple ordering = (distance, index): deterministic tie-breaking
-    // that matches the NumPy fallback (hamming_topk_numpy).
-    dist_idx.select_nth_unstable(k - 1);
-    dist_idx[..k].sort_unstable();
-
-    let indices: Vec<u64> = dist_idx[..k].iter().map(|&(_, i)| i as u64).collect();
-    PyArray1::from_vec_bound(py, indices)
+    PyArray1::from_vec_bound(py, top.into_sorted_indices())
 }
 
 #[pyfunction]
@@ -290,21 +395,48 @@ fn hamming_topk_parallel<'py>(
     let db = database.as_array();
     let n = db.shape()[0];
     let k = k.min(n);
+    if k == 0 {
+        return PyArray1::from_vec_bound(py, Vec::new());
+    }
 
-    let rows: Vec<&[u8]> = (0..n).map(|i| db.row(i).to_slice().unwrap()).collect();
-    let mut dist_idx: Vec<(u32, usize)> = rows
-        .par_iter()
-        .enumerate()
-        .map(|(i, row)| (hamming(row, q), i))
-        .collect();
+    // Chunked fold/reduce: each worker keeps its own bounded TopK, then the
+    // k-sized heaps merge. No N-sized materialization anywhere (the old code
+    // collected a Vec<&[u8]> of all rows AND a Vec of N distance tuples).
+    let chunk = 16_384;
+    let top = if let Ok(flat) = database.as_slice() {
+        let row_bytes = q.len();
+        flat.par_chunks_exact(row_bytes)
+            .with_min_len(chunk)
+            .enumerate()
+            .fold(
+                || TopK::new(k),
+                |mut acc, (i, row)| {
+                    let d = hamming(row, q);
+                    if d <= acc.worst_dist() {
+                        acc.push(d, i as u64);
+                    }
+                    acc
+                },
+            )
+            .reduce(|| TopK::new(k), TopK::merge)
+    } else {
+        (0..n)
+            .into_par_iter()
+            .with_min_len(chunk)
+            .fold(
+                || TopK::new(k),
+                |mut acc, i| {
+                    let d = hamming(db.row(i).to_slice().unwrap(), q);
+                    if d <= acc.worst_dist() {
+                        acc.push(d, i as u64);
+                    }
+                    acc
+                },
+            )
+            .reduce(|| TopK::new(k), TopK::merge)
+    };
 
-    // Plain tuple ordering = (distance, index): deterministic tie-breaking
-    // that matches the NumPy fallback (hamming_topk_numpy).
-    dist_idx.select_nth_unstable(k - 1);
-    dist_idx[..k].sort_unstable();
-
-    let indices: Vec<u64> = dist_idx[..k].iter().map(|&(_, i)| i as u64).collect();
-    PyArray1::from_vec_bound(py, indices)
+    PyArray1::from_vec_bound(py, top.into_sorted_indices())
 }
 
 /// Cache-block target in bytes. We tile the database so one block of codes

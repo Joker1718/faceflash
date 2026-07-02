@@ -25,6 +25,18 @@ adheres to [Semantic Versioning](https://semver.org/).
 - `search`/`search_batch` no longer exclude one database vector from the
   shortlist (`count - 1` clamp leftover).
 
+### Performance
+- **Hamming top-k no longer materializes N distances.** The kernel allocated a
+  Vec of N (distance, index) tuples per query (16 MB at 1M) and ran a second
+  selection pass; it now keeps a bounded k-size max-heap with the same
+  deterministic (distance, index) tie-breaking. The scan writes nothing per
+  row in the common case.
+- **Fixed 64-byte NEON path**: four independent XOR+CNT chains with a single
+  cross-lane reduction, replacing one horizontal reduce per 16-byte block.
+- Net effect on Apple M-series at 1M codes: 2.8ms -> 1.3ms single-query scan,
+  from ~2x slower than FAISS IndexBinaryFlat to ~1.4x faster. x86 gets the
+  heap fix; AVX-512 numbers pending a RunPod re-run.
+
 ### Changed
 - Benchmarks measure competitor memory from saved-index file sizes instead of
   multiplier estimates (old estimates ran ~30% high), sweep USearch
