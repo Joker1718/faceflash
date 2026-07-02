@@ -1,0 +1,2067 @@
+{
+  "benchmark": "ANN Comparison (FaceFlash vs competitors)",
+  "methodology": {
+    "all_methods_single_threaded": true,
+    "ground_truth": "exact brute-force cosine argmax",
+    "timing": "time.perf_counter() per query, 10 warmup excluded",
+    "metric": "inner product (cosine on L2-normalized vectors)",
+    "memory": "measured from serialized index file size where the library supports it; per-row memory_note says which",
+    "tiling": "scales larger than the real dataset tile the real embeddings; per-scale 'tiled'/'n_unique_vectors' fields record this, and recall scoring is tie-aware so duplicates don't skew any method"
+  },
+  "environment": {
+    "platform": "linux",
+    "faceflash_backend": "faceflash._core (Rust, SIMD-accelerated)",
+    "faiss": true,
+    "hnswlib": true,
+    "usearch": true,
+    "scann": true
+  },
+  "scales": {
+    "100K": {
+      "n_database": 100000,
+      "n_queries": 1000,
+      "n_identities": 6939,
+      "tiled": false,
+      "n_unique_vectors": 100000,
+      "faiss_flat_ms": 4.986753587378189,
+      "methods": [
+        {
+          "method": "FAISS-Flat (exact)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 4.986753587378189,
+          "latency_median_ms": 4.894468933343887,
+          "latency_p95_ms": 5.021747201681137,
+          "latency_p99_ms": 5.291895759291947,
+          "qps": 200.53126397323254,
+          "memory_mb": 195.31,
+          "memory_note": "full float vectors (exact \u2014 flat index stores vectors verbatim)",
+          "index_type": "brute_force"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=16)",
+          "recall_at_1": 0.973,
+          "latency_mean_ms": 0.30214997101575136,
+          "latency_median_ms": 0.27618708554655313,
+          "latency_p95_ms": 0.40041131433099486,
+          "latency_p99_ms": 0.8993376907892524,
+          "qps": 3309.614747399294,
+          "memory_mb": 196.58,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=32)",
+          "recall_at_1": 0.986,
+          "latency_mean_ms": 0.5637617434840649,
+          "latency_median_ms": 0.562634551897645,
+          "latency_p95_ms": 0.6136569660156965,
+          "latency_p99_ms": 0.6357857445254922,
+          "qps": 1773.7989701464473,
+          "memory_mb": 196.58,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=64)",
+          "recall_at_1": 0.996,
+          "latency_mean_ms": 1.1875477901194245,
+          "latency_median_ms": 1.1607109336182475,
+          "latency_p95_ms": 1.223716523963958,
+          "latency_p99_ms": 1.6655548708513372,
+          "qps": 842.0713745755327,
+          "memory_mb": 196.58,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "HNSWLIB (ef=32)",
+          "recall_at_1": 0.96,
+          "latency_mean_ms": 0.16764884628355503,
+          "latency_median_ms": 0.16518589109182358,
+          "latency_p95_ms": 0.21248405100777745,
+          "latency_p99_ms": 0.23395938565954563,
+          "qps": 5964.848683233031,
+          "memory_mb": 221.65,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 32
+          }
+        },
+        {
+          "method": "HNSWLIB (ef=64)",
+          "recall_at_1": 0.988,
+          "latency_mean_ms": 0.3161724554374814,
+          "latency_median_ms": 0.3164369845762849,
+          "latency_p95_ms": 0.375852279830724,
+          "latency_p99_ms": 0.3942290530540049,
+          "qps": 3162.83086272117,
+          "memory_mb": 221.65,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 64
+          }
+        },
+        {
+          "method": "HNSWLIB (ef=128)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.6039323459845036,
+          "latency_median_ms": 0.6082725012674928,
+          "latency_p95_ms": 0.6770065287128091,
+          "latency_p99_ms": 0.7029899512417614,
+          "qps": 1655.8146067997807,
+          "memory_mb": 221.65,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 128
+          }
+        },
+        {
+          "method": "USearch (exp=64)",
+          "recall_at_1": 0.989,
+          "latency_mean_ms": 0.18229934014379978,
+          "latency_median_ms": 0.17896201461553574,
+          "latency_p95_ms": 0.2529791556298733,
+          "latency_p99_ms": 0.2809436619281769,
+          "qps": 5485.483377017101,
+          "memory_mb": 111.85,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 64
+          }
+        },
+        {
+          "method": "USearch (exp=128)",
+          "recall_at_1": 0.991,
+          "latency_mean_ms": 0.3328923371154815,
+          "latency_median_ms": 0.32325799111276865,
+          "latency_p95_ms": 0.43356206733733405,
+          "latency_p99_ms": 0.5667473282665013,
+          "qps": 3003.9742238136787,
+          "memory_mb": 111.85,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 128
+          }
+        },
+        {
+          "method": "USearch (exp=256)",
+          "recall_at_1": 0.991,
+          "latency_mean_ms": 0.5987894891295582,
+          "latency_median_ms": 0.574697507545352,
+          "latency_p95_ms": 0.7337257266044616,
+          "latency_p99_ms": 1.1276963865384455,
+          "qps": 1670.035994542371,
+          "memory_mb": 111.85,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 256
+          }
+        },
+        {
+          "method": "ScaNN (leaves=316)",
+          "recall_at_1": 0.984,
+          "latency_mean_ms": 0.10394835332408547,
+          "latency_median_ms": 0.10318402200937271,
+          "latency_p95_ms": 0.11105759767815471,
+          "latency_p99_ms": 0.11608718195930123,
+          "qps": 9620.162013362975,
+          "memory_mb": 12.21,
+          "memory_note": "quantized vectors (estimated ~0.25x raw)",
+          "index_type": "scann",
+          "params": {
+            "n_leaves": 316,
+            "reorder_k": 100
+          }
+        },
+        {
+          "method": "FaceFlash (256b/100c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.647847409825772,
+          "latency_median_ms": 0.6467495113611221,
+          "latency_p95_ms": 0.6634866818785667,
+          "latency_p99_ms": 0.671921456232667,
+          "qps": 1543.5733551345581,
+          "memory_mb": 3.05,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 256,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "FaceFlash (256b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.6700184140354395,
+          "latency_median_ms": 0.669228145852685,
+          "latency_p95_ms": 0.6850571255199611,
+          "latency_p99_ms": 0.6931265909224749,
+          "qps": 1492.4962942094703,
+          "memory_mb": 3.05,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 256,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "FaceFlash (384b/100c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 0.8714614894706756,
+          "latency_median_ms": 0.8274689316749573,
+          "latency_p95_ms": 0.8452044217847288,
+          "latency_p99_ms": 0.8534466614946723,
+          "qps": 1147.4976371100443,
+          "memory_mb": 4.58,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 384,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "FaceFlash (384b/300c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 0.8510925625450909,
+          "latency_median_ms": 0.8509940234944224,
+          "latency_p95_ms": 0.8655529469251633,
+          "latency_p99_ms": 0.8742962684482336,
+          "qps": 1174.960332175409,
+          "memory_mb": 4.58,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 384,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "FaceFlash (512b/100c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.398032499011606,
+          "latency_median_ms": 0.3210189752280712,
+          "latency_p95_ms": 0.3364725620485842,
+          "latency_p99_ms": 0.3463434777222574,
+          "qps": 2512.3576654750536,
+          "memory_mb": 6.1,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "FaceFlash (512b/200c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.3359629225451499,
+          "latency_median_ms": 0.335159944370389,
+          "latency_p95_ms": 0.3501824918203056,
+          "latency_p99_ms": 0.35885321674868464,
+          "qps": 2976.51893376898,
+          "memory_mb": 6.1,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 200
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "FaceFlash (512b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.3487281398847699,
+          "latency_median_ms": 0.34774397499859333,
+          "latency_p95_ms": 0.3637029556557536,
+          "latency_p99_ms": 0.3716638428159058,
+          "qps": 2867.5632552349507,
+          "memory_mb": 6.1,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "FaceFlash (512b/100c, mmap rerank)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.3269327273592353,
+          "latency_median_ms": 0.3253599861636758,
+          "latency_p95_ms": 0.34517740132287145,
+          "latency_p99_ms": 0.3702167118899524,
+          "qps": 3058.733238722825,
+          "memory_mb": 6.1,
+          "memory_note": "binary index in RAM; floats on disk, rerank pages in ~100 rows/query (warm page cache)",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "mmap_rerank": true
+          },
+          "float_store_disk_mb": 195.31
+        },
+        {
+          "method": "FaceFlash (512b/100c, parallel)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.47641744813881814,
+          "latency_median_ms": 0.4751489032059908,
+          "latency_p95_ms": 0.5000965087674558,
+          "latency_p99_ms": 0.5108368629589677,
+          "qps": 2098.999530572652,
+          "memory_mb": 6.1,
+          "memory_note": "binary index only; multi-core Hamming scan",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "parallel": true
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "FaceFlash (512b/100c, batched)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.03473189705982804,
+          "latency_median_ms": 0.03473189705982804,
+          "latency_p95_ms": 0.03473189705982804,
+          "latency_p99_ms": 0.03473189705982804,
+          "qps": 28791.97753803751,
+          "memory_mb": 6.1,
+          "memory_note": "binary index only; batched multi-core scan (bulk throughput)",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "batched": true
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "FAISS-BinaryFlat + rerank",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.19472351530566812,
+          "latency_median_ms": 0.1942149829119444,
+          "latency_p95_ms": 0.20168593619018793,
+          "latency_p99_ms": 0.20687336567789316,
+          "qps": 5135.486581732286,
+          "memory_mb": 6.1,
+          "memory_note": "measured (write_index_binary file size); same 64-byte PCA+ITQ codes as FaceFlash, same cosine rerank",
+          "index_type": "binary_flat",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "same_codes": true
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "FAISS-BinaryHNSW + rerank",
+          "recall_at_1": 0.958,
+          "latency_mean_ms": 0.0657816391903907,
+          "latency_median_ms": 0.06338453385978937,
+          "latency_p95_ms": 0.09362453129142523,
+          "latency_p99_ms": 0.1092751300893724,
+          "qps": 15201.810297030097,
+          "memory_mb": 32.06,
+          "memory_note": "measured (write_index_binary file size); same 64-byte PCA+ITQ codes as FaceFlash, same cosine rerank",
+          "index_type": "binary_hnsw",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "same_codes": true
+          },
+          "float_vectors_mb": 195.31
+        },
+        {
+          "method": "HNSWLIB (ef=128, batched)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.1747946219984442,
+          "latency_median_ms": 0.1747946219984442,
+          "latency_p95_ms": 0.1747946219984442,
+          "latency_p99_ms": 0.1747946219984442,
+          "qps": 5720.999814335825,
+          "memory_mb": 221.65,
+          "memory_note": "vectors + graph (measured); batched multi-core throughput",
+          "index_type": "hnsw",
+          "params": {
+            "batched": true
+          }
+        },
+        {
+          "method": "USearch (exp=128, batched)",
+          "recall_at_1": 0.995,
+          "latency_mean_ms": 0.011348754167556763,
+          "latency_median_ms": 0.011348754167556763,
+          "latency_p95_ms": 0.011348754167556763,
+          "latency_p99_ms": 0.011348754167556763,
+          "qps": 88115.39885662065,
+          "memory_mb": 111.85,
+          "memory_note": "vectors + graph (measured); batched multi-core throughput",
+          "index_type": "hnsw",
+          "params": {
+            "batched": true
+          }
+        }
+      ]
+    },
+    "200K": {
+      "n_database": 200000,
+      "n_queries": 1000,
+      "n_identities": 13749,
+      "tiled": false,
+      "n_unique_vectors": 200000,
+      "faiss_flat_ms": 9.921380200888962,
+      "methods": [
+        {
+          "method": "FAISS-Flat (exact)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 9.921380200888962,
+          "latency_median_ms": 9.894354036077857,
+          "latency_p95_ms": 10.075663193129003,
+          "latency_p99_ms": 10.338851297274232,
+          "qps": 100.79242804447706,
+          "memory_mb": 390.62,
+          "memory_note": "full float vectors (exact \u2014 flat index stores vectors verbatim)",
+          "index_type": "brute_force"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=16)",
+          "recall_at_1": 0.941,
+          "latency_mean_ms": 0.5507448844145983,
+          "latency_median_ms": 0.5493994103744626,
+          "latency_p95_ms": 0.6099800462834537,
+          "latency_p99_ms": 0.6642754329368472,
+          "qps": 1815.7227208073427,
+          "memory_mb": 392.65,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=32)",
+          "recall_at_1": 0.971,
+          "latency_mean_ms": 1.1566418912261724,
+          "latency_median_ms": 1.1419025249779224,
+          "latency_p95_ms": 1.238920202013105,
+          "latency_p99_ms": 1.7992425966076553,
+          "qps": 864.5718329809807,
+          "memory_mb": 392.65,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=64)",
+          "recall_at_1": 0.986,
+          "latency_mean_ms": 2.2668197550810874,
+          "latency_median_ms": 2.263459493406117,
+          "latency_p95_ms": 2.3671827977523208,
+          "latency_p99_ms": 2.433461423497647,
+          "qps": 441.1466759800797,
+          "memory_mb": 392.65,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "HNSWLIB (ef=32)",
+          "recall_at_1": 0.967,
+          "latency_mean_ms": 0.18568957108072937,
+          "latency_median_ms": 0.1831180416047573,
+          "latency_p95_ms": 0.24230302078649402,
+          "latency_p99_ms": 0.28017471777275205,
+          "qps": 5385.332058122131,
+          "memory_mb": 443.31,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 32
+          }
+        },
+        {
+          "method": "HNSWLIB (ef=64)",
+          "recall_at_1": 0.991,
+          "latency_mean_ms": 0.3431800031103194,
+          "latency_median_ms": 0.34423312172293663,
+          "latency_p95_ms": 0.4119079443626106,
+          "latency_p99_ms": 0.44972891220822925,
+          "qps": 2913.92269635984,
+          "memory_mb": 443.31,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 64
+          }
+        },
+        {
+          "method": "HNSWLIB (ef=128)",
+          "recall_at_1": 0.996,
+          "latency_mean_ms": 0.6566068031825125,
+          "latency_median_ms": 0.6582965143024921,
+          "latency_p95_ms": 0.7457132334820925,
+          "latency_p99_ms": 0.7820479036308825,
+          "qps": 1522.9814786461127,
+          "memory_mb": 443.31,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 128
+          }
+        },
+        {
+          "method": "USearch (exp=64)",
+          "recall_at_1": 0.994,
+          "latency_mean_ms": 0.22216589748859406,
+          "latency_median_ms": 0.21139055024832487,
+          "latency_p95_ms": 0.33082651207223535,
+          "latency_p99_ms": 0.4328152490779757,
+          "qps": 4501.140865021103,
+          "memory_mb": 223.67,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 64
+          }
+        },
+        {
+          "method": "USearch (exp=128)",
+          "recall_at_1": 0.996,
+          "latency_mean_ms": 0.3846154345665127,
+          "latency_median_ms": 0.375359901227057,
+          "latency_p95_ms": 0.5179755855351685,
+          "latency_p99_ms": 0.6515848799608646,
+          "qps": 2599.999662330418,
+          "memory_mb": 223.67,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 128
+          }
+        },
+        {
+          "method": "USearch (exp=256)",
+          "recall_at_1": 0.996,
+          "latency_mean_ms": 0.6811175013426691,
+          "latency_median_ms": 0.6767390295863152,
+          "latency_p95_ms": 0.875811988953501,
+          "latency_p99_ms": 0.9886698937043548,
+          "qps": 1468.1754587552457,
+          "memory_mb": 223.67,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 256
+          }
+        },
+        {
+          "method": "ScaNN (leaves=447)",
+          "recall_at_1": 0.972,
+          "latency_mean_ms": 0.1887491790112108,
+          "latency_median_ms": 0.18829607870429754,
+          "latency_p95_ms": 0.19978691125288606,
+          "latency_p99_ms": 0.2059712866321206,
+          "qps": 5298.036289421978,
+          "memory_mb": 24.41,
+          "memory_note": "quantized vectors (estimated ~0.25x raw)",
+          "index_type": "scann",
+          "params": {
+            "n_leaves": 447,
+            "reorder_k": 100
+          }
+        },
+        {
+          "method": "FaceFlash (256b/100c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 1.3883734550327063,
+          "latency_median_ms": 1.2718159705400467,
+          "latency_p95_ms": 1.3038489152677357,
+          "latency_p99_ms": 1.6181050706654758,
+          "qps": 720.2673001094239,
+          "memory_mb": 6.1,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 256,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "FaceFlash (256b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.3059780055191368,
+          "latency_median_ms": 1.3002289924770594,
+          "latency_p95_ms": 1.3284714194014668,
+          "latency_p99_ms": 1.407616294454783,
+          "qps": 765.7096794692893,
+          "memory_mb": 6.1,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 256,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "FaceFlash (384b/100c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 1.7127466641832143,
+          "latency_median_ms": 1.6293489607051015,
+          "latency_p95_ms": 1.6573055880144238,
+          "latency_p99_ms": 1.7007386242039433,
+          "qps": 583.8575084756545,
+          "memory_mb": 9.16,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 384,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "FaceFlash (384b/300c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 1.6651529397349805,
+          "latency_median_ms": 1.6609260346740484,
+          "latency_p95_ms": 1.6906144563108683,
+          "latency_p99_ms": 1.7120343586429954,
+          "qps": 600.5454370810866,
+          "memory_mb": 9.16,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 384,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "FaceFlash (512b/100c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.7041489295661449,
+          "latency_median_ms": 0.6269749719649553,
+          "latency_p95_ms": 0.6564731360413134,
+          "latency_p99_ms": 0.8519780286587774,
+          "qps": 1420.1541151474037,
+          "memory_mb": 12.21,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "FaceFlash (512b/200c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.6446161312051117,
+          "latency_median_ms": 0.6420019781216979,
+          "latency_p95_ms": 0.6718619144521654,
+          "latency_p99_ms": 0.6965374550782144,
+          "qps": 1551.3108524456206,
+          "memory_mb": 12.21,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 200
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "FaceFlash (512b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.6636742509435862,
+          "latency_median_ms": 0.6589730037376285,
+          "latency_p95_ms": 0.6882034125737846,
+          "latency_p99_ms": 0.8891458995640278,
+          "qps": 1506.763293254543,
+          "memory_mb": 12.21,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "FaceFlash (512b/100c, mmap rerank)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.6358024193905294,
+          "latency_median_ms": 0.6333639612421393,
+          "latency_p95_ms": 0.6694214418530464,
+          "latency_p99_ms": 0.6974493316374718,
+          "qps": 1572.815657037897,
+          "memory_mb": 12.21,
+          "memory_note": "binary index in RAM; floats on disk, rerank pages in ~100 rows/query (warm page cache)",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "mmap_rerank": true
+          },
+          "float_store_disk_mb": 390.62
+        },
+        {
+          "method": "FaceFlash (512b/100c, parallel)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.6867332092951983,
+          "latency_median_ms": 0.6842500297352672,
+          "latency_p95_ms": 0.7334230816923082,
+          "latency_p99_ms": 0.7624364015646279,
+          "qps": 1456.169566965184,
+          "memory_mb": 12.21,
+          "memory_note": "binary index only; multi-core Hamming scan",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "parallel": true
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "FaceFlash (512b/100c, batched)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.05428306898102164,
+          "latency_median_ms": 0.05428306898102164,
+          "latency_p95_ms": 0.05428306898102164,
+          "latency_p99_ms": 0.05428306898102164,
+          "qps": 18421.950320266864,
+          "memory_mb": 12.21,
+          "memory_note": "binary index only; batched multi-core scan (bulk throughput)",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "batched": true
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "FAISS-BinaryFlat + rerank",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.34307220578193665,
+          "latency_median_ms": 0.34247059375047684,
+          "latency_p95_ms": 0.3517300356179476,
+          "latency_p99_ms": 0.36178046837449074,
+          "qps": 2914.838285196497,
+          "memory_mb": 12.21,
+          "memory_note": "measured (write_index_binary file size); same 64-byte PCA+ITQ codes as FaceFlash, same cosine rerank",
+          "index_type": "binary_flat",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "same_codes": true
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "FAISS-BinaryHNSW + rerank",
+          "recall_at_1": 0.916,
+          "latency_mean_ms": 0.07493708608672023,
+          "latency_median_ms": 0.07365015335381031,
+          "latency_p95_ms": 0.10736106196418405,
+          "latency_p99_ms": 0.11890307301655412,
+          "qps": 13344.527419210823,
+          "memory_mb": 64.11,
+          "memory_note": "measured (write_index_binary file size); same 64-byte PCA+ITQ codes as FaceFlash, same cosine rerank",
+          "index_type": "binary_hnsw",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "same_codes": true
+          },
+          "float_vectors_mb": 390.62
+        },
+        {
+          "method": "HNSWLIB (ef=128, batched)",
+          "recall_at_1": 0.997,
+          "latency_mean_ms": 0.17831176496110857,
+          "latency_median_ms": 0.17831176496110857,
+          "latency_p95_ms": 0.17831176496110857,
+          "latency_p99_ms": 0.17831176496110857,
+          "qps": 5608.154909005074,
+          "memory_mb": 443.31,
+          "memory_note": "vectors + graph (measured); batched multi-core throughput",
+          "index_type": "hnsw",
+          "params": {
+            "batched": true
+          }
+        },
+        {
+          "method": "USearch (exp=128, batched)",
+          "recall_at_1": 0.992,
+          "latency_mean_ms": 0.04402476316317916,
+          "latency_median_ms": 0.04402476316317916,
+          "latency_p95_ms": 0.04402476316317916,
+          "latency_p99_ms": 0.04402476316317916,
+          "qps": 22714.489031853933,
+          "memory_mb": 223.67,
+          "memory_note": "vectors + graph (measured); batched multi-core throughput",
+          "index_type": "hnsw",
+          "params": {
+            "batched": true
+          }
+        }
+      ]
+    },
+    "300K": {
+      "n_database": 300000,
+      "n_queries": 1000,
+      "n_identities": 20615,
+      "tiled": false,
+      "n_unique_vectors": 300000,
+      "faiss_flat_ms": 14.406059672823176,
+      "methods": [
+        {
+          "method": "FAISS-Flat (exact)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 14.406059672823176,
+          "latency_median_ms": 14.366377028636634,
+          "latency_p95_ms": 14.743231562897563,
+          "latency_p99_ms": 14.97207795502618,
+          "qps": 69.41523377738645,
+          "memory_mb": 585.94,
+          "memory_note": "full float vectors (exact \u2014 flat index stores vectors verbatim)",
+          "index_type": "brute_force"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=16)",
+          "recall_at_1": 0.929,
+          "latency_mean_ms": 0.8205084756482393,
+          "latency_median_ms": 0.8196324342861772,
+          "latency_p95_ms": 0.9020125376991927,
+          "latency_p99_ms": 0.9465147950686514,
+          "qps": 1218.7564536855689,
+          "memory_mb": 588.73,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=32)",
+          "recall_at_1": 0.966,
+          "latency_mean_ms": 1.6894835121929646,
+          "latency_median_ms": 1.68696662876755,
+          "latency_p95_ms": 1.8044041586108506,
+          "latency_p99_ms": 1.8697985005564988,
+          "qps": 591.8968683523825,
+          "memory_mb": 588.73,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=64)",
+          "recall_at_1": 0.988,
+          "latency_mean_ms": 3.3466223182622343,
+          "latency_median_ms": 3.342790063470602,
+          "latency_p95_ms": 3.48720921901986,
+          "latency_p99_ms": 3.558160439133644,
+          "qps": 298.8087405450818,
+          "memory_mb": 588.73,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "HNSWLIB (ef=32)",
+          "recall_at_1": 0.968,
+          "latency_mean_ms": 0.21996182366274297,
+          "latency_median_ms": 0.20589691121131182,
+          "latency_p95_ms": 0.3454745514318347,
+          "latency_p99_ms": 0.4262029682286081,
+          "qps": 4546.243449650848,
+          "memory_mb": 664.98,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 32
+          }
+        },
+        {
+          "method": "HNSWLIB (ef=64)",
+          "recall_at_1": 0.99,
+          "latency_mean_ms": 0.41005699476227164,
+          "latency_median_ms": 0.38230500649660826,
+          "latency_p95_ms": 0.6415792158804833,
+          "latency_p99_ms": 0.7506390125490723,
+          "qps": 2438.685384649382,
+          "memory_mb": 664.98,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 64
+          }
+        },
+        {
+          "method": "HNSWLIB (ef=128)",
+          "recall_at_1": 0.998,
+          "latency_mean_ms": 0.793961220420897,
+          "latency_median_ms": 0.7160629611462355,
+          "latency_p95_ms": 1.2303789495490491,
+          "latency_p99_ms": 1.7194153089076272,
+          "qps": 1259.5073591502078,
+          "memory_mb": 664.98,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 128
+          }
+        },
+        {
+          "method": "USearch (exp=64)",
+          "recall_at_1": 0.992,
+          "latency_mean_ms": 0.27581510064192116,
+          "latency_median_ms": 0.25504513178020716,
+          "latency_p95_ms": 0.44940471416339267,
+          "latency_p99_ms": 0.551770799793303,
+          "qps": 3625.617298228558,
+          "memory_mb": 335.42,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 64
+          }
+        },
+        {
+          "method": "USearch (exp=128)",
+          "recall_at_1": 0.996,
+          "latency_mean_ms": 0.42750092037022114,
+          "latency_median_ms": 0.41681656148284674,
+          "latency_p95_ms": 0.5843833670951426,
+          "latency_p99_ms": 0.6652020453475416,
+          "qps": 2339.176250507221,
+          "memory_mb": 335.42,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 128
+          }
+        },
+        {
+          "method": "USearch (exp=256)",
+          "recall_at_1": 0.996,
+          "latency_mean_ms": 0.8059107146691531,
+          "latency_median_ms": 0.7729430217295885,
+          "latency_p95_ms": 1.0476344963535666,
+          "latency_p99_ms": 1.711577079258859,
+          "qps": 1240.8322433217995,
+          "memory_mb": 335.42,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 256
+          }
+        },
+        {
+          "method": "ScaNN (leaves=547)",
+          "recall_at_1": 0.978,
+          "latency_mean_ms": 0.27090182388201356,
+          "latency_median_ms": 0.27054292149841785,
+          "latency_p95_ms": 0.28713191859424114,
+          "latency_p99_ms": 0.29585091629996896,
+          "qps": 3691.3741874086904,
+          "memory_mb": 36.62,
+          "memory_note": "quantized vectors (estimated ~0.25x raw)",
+          "index_type": "scann",
+          "params": {
+            "n_leaves": 547,
+            "reorder_k": 100
+          }
+        },
+        {
+          "method": "FaceFlash (256b/100c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 1.972530260682106,
+          "latency_median_ms": 1.8887820187956095,
+          "latency_p95_ms": 2.7235269546508785,
+          "latency_p99_ms": 2.9976950748823583,
+          "qps": 506.9630717118618,
+          "memory_mb": 9.16,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 256,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "FaceFlash (256b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.952053229790181,
+          "latency_median_ms": 1.91730004735291,
+          "latency_p95_ms": 2.222642325796187,
+          "latency_p99_ms": 2.7626926288940012,
+          "qps": 512.2811123892797,
+          "memory_mb": 9.16,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 256,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "FaceFlash (384b/100c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 2.5005762176588178,
+          "latency_median_ms": 2.420285134576261,
+          "latency_p95_ms": 2.461129450239241,
+          "latency_p99_ms": 2.4923871573992074,
+          "qps": 399.90782641940706,
+          "memory_mb": 13.73,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 384,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "FaceFlash (384b/300c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 2.526234821183607,
+          "latency_median_ms": 2.4568644585087895,
+          "latency_p95_ms": 2.84434998175129,
+          "latency_p99_ms": 4.095872342586517,
+          "qps": 395.8460201777576,
+          "memory_mb": 13.73,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 384,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "FaceFlash (512b/100c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.1998747067991644,
+          "latency_median_ms": 0.9356505470350385,
+          "latency_p95_ms": 2.0364312222227454,
+          "latency_p99_ms": 5.615709379781037,
+          "qps": 833.4203515862431,
+          "memory_mb": 18.31,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "FaceFlash (512b/200c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.0692965791095048,
+          "latency_median_ms": 0.9729715529829264,
+          "latency_p95_ms": 1.7957548378035424,
+          "latency_p99_ms": 2.2826210991479448,
+          "qps": 935.1942384710386,
+          "memory_mb": 18.31,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 200
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "FaceFlash (512b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.133908765623346,
+          "latency_median_ms": 1.0037025203928351,
+          "latency_p95_ms": 1.8957672058604655,
+          "latency_p99_ms": 3.007878041826188,
+          "qps": 881.9051676086726,
+          "memory_mb": 18.31,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "FaceFlash (512b/100c, mmap rerank)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.943355186842382,
+          "latency_median_ms": 0.9412141516804695,
+          "latency_p95_ms": 0.9830783237703145,
+          "latency_p99_ms": 1.0050600138492882,
+          "qps": 1060.0461140699515,
+          "memory_mb": 18.31,
+          "memory_note": "binary index in RAM; floats on disk, rerank pages in ~100 rows/query (warm page cache)",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "mmap_rerank": true
+          },
+          "float_store_disk_mb": 585.94
+        },
+        {
+          "method": "FaceFlash (512b/100c, parallel)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.9802311793901026,
+          "latency_median_ms": 0.9764013811945915,
+          "latency_p95_ms": 1.036835985723883,
+          "latency_p99_ms": 1.063425347674638,
+          "qps": 1020.1675084669287,
+          "memory_mb": 18.31,
+          "memory_note": "binary index only; multi-core Hamming scan",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "parallel": true
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "FaceFlash (512b/100c, batched)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.07216255995444953,
+          "latency_median_ms": 0.07216255995444953,
+          "latency_p95_ms": 0.07216255995444953,
+          "latency_p99_ms": 0.07216255995444953,
+          "qps": 13857.601512906696,
+          "memory_mb": 18.31,
+          "memory_note": "binary index only; batched multi-core scan (bulk throughput)",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "batched": true
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "FAISS-BinaryFlat + rerank",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.49001593329012394,
+          "latency_median_ms": 0.48934994265437126,
+          "latency_p95_ms": 0.49910658271983266,
+          "latency_p99_ms": 0.5040129856206477,
+          "qps": 2040.7499676299906,
+          "memory_mb": 18.31,
+          "memory_note": "measured (write_index_binary file size); same 64-byte PCA+ITQ codes as FaceFlash, same cosine rerank",
+          "index_type": "binary_flat",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "same_codes": true
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "FAISS-BinaryHNSW + rerank",
+          "recall_at_1": 0.863,
+          "latency_mean_ms": 0.08660108549520373,
+          "latency_median_ms": 0.08467142470180988,
+          "latency_p95_ms": 0.1268381834961474,
+          "latency_p99_ms": 0.13855299446731806,
+          "qps": 11547.199371483437,
+          "memory_mb": 96.17,
+          "memory_note": "measured (write_index_binary file size); same 64-byte PCA+ITQ codes as FaceFlash, same cosine rerank",
+          "index_type": "binary_hnsw",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "same_codes": true
+          },
+          "float_vectors_mb": 585.94
+        },
+        {
+          "method": "HNSWLIB (ef=128, batched)",
+          "recall_at_1": 0.997,
+          "latency_mean_ms": 0.17655398813076317,
+          "latency_median_ms": 0.17655398813076317,
+          "latency_p95_ms": 0.17655398813076317,
+          "latency_p99_ms": 0.17655398813076317,
+          "qps": 5663.989868409875,
+          "memory_mb": 664.98,
+          "memory_note": "vectors + graph (measured); batched multi-core throughput",
+          "index_type": "hnsw",
+          "params": {
+            "batched": true
+          }
+        },
+        {
+          "method": "USearch (exp=128, batched)",
+          "recall_at_1": 0.994,
+          "latency_mean_ms": 0.015447965124621987,
+          "latency_median_ms": 0.015447965124621987,
+          "latency_p95_ms": 0.015447965124621987,
+          "latency_p99_ms": 0.015447965124621987,
+          "qps": 64733.44495102037,
+          "memory_mb": 335.42,
+          "memory_note": "vectors + graph (measured); batched multi-core throughput",
+          "index_type": "hnsw",
+          "params": {
+            "batched": true
+          }
+        }
+      ]
+    },
+    "500K": {
+      "n_database": 500000,
+      "n_queries": 1000,
+      "n_identities": 34328,
+      "tiled": false,
+      "n_unique_vectors": 500000,
+      "faiss_flat_ms": 24.300959527958184,
+      "methods": [
+        {
+          "method": "FAISS-Flat (exact)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 24.300959527958184,
+          "latency_median_ms": 24.083191412501037,
+          "latency_p95_ms": 24.742303136736155,
+          "latency_p99_ms": 25.915170232765377,
+          "qps": 41.15063846962516,
+          "memory_mb": 976.56,
+          "memory_note": "full float vectors (exact \u2014 flat index stores vectors verbatim)",
+          "index_type": "brute_force"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=16)",
+          "recall_at_1": 0.882,
+          "latency_mean_ms": 1.4255069310311228,
+          "latency_median_ms": 1.420924556441605,
+          "latency_p95_ms": 1.553236716426909,
+          "latency_p99_ms": 1.6097604623064399,
+          "qps": 701.5048318822711,
+          "memory_mb": 980.88,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=32)",
+          "recall_at_1": 0.949,
+          "latency_mean_ms": 2.8594700021203607,
+          "latency_median_ms": 2.8559251222759485,
+          "latency_p95_ms": 3.0418006354011595,
+          "latency_p99_ms": 3.1266953167505562,
+          "qps": 349.71515674529815,
+          "memory_mb": 980.88,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=64)",
+          "recall_at_1": 0.977,
+          "latency_mean_ms": 5.710612392518669,
+          "latency_median_ms": 5.694480030797422,
+          "latency_p95_ms": 5.981209210585803,
+          "latency_p99_ms": 6.306126324925572,
+          "qps": 175.1125678412485,
+          "memory_mb": 980.88,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "HNSWLIB (ef=32)",
+          "recall_at_1": 0.966,
+          "latency_mean_ms": 0.213026552926749,
+          "latency_median_ms": 0.2099890261888504,
+          "latency_p95_ms": 0.28718640096485615,
+          "latency_p99_ms": 0.3251469251699745,
+          "qps": 4694.25048784345,
+          "memory_mb": 1108.31,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 32
+          }
+        },
+        {
+          "method": "HNSWLIB (ef=64)",
+          "recall_at_1": 0.992,
+          "latency_mean_ms": 0.3826897630933672,
+          "latency_median_ms": 0.38035260513424873,
+          "latency_p95_ms": 0.4704259685240686,
+          "latency_p99_ms": 0.5224257404915988,
+          "qps": 2613.0827015511877,
+          "memory_mb": 1108.31,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 64
+          }
+        },
+        {
+          "method": "HNSWLIB (ef=128)",
+          "recall_at_1": 0.998,
+          "latency_mean_ms": 0.7231821895111352,
+          "latency_median_ms": 0.7223275024443865,
+          "latency_p95_ms": 0.8378164144232869,
+          "latency_p99_ms": 0.9053953690454364,
+          "qps": 1382.7774169549048,
+          "memory_mb": 1108.31,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 128
+          }
+        },
+        {
+          "method": "USearch (exp=64)",
+          "recall_at_1": 0.974,
+          "latency_mean_ms": 0.28073645383119583,
+          "latency_median_ms": 0.269251991994679,
+          "latency_p95_ms": 0.43600160861387843,
+          "latency_p99_ms": 0.5239771190099417,
+          "qps": 3562.0596696761386,
+          "memory_mb": 559.04,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 64
+          }
+        },
+        {
+          "method": "USearch (exp=128)",
+          "recall_at_1": 0.997,
+          "latency_mean_ms": 0.4770519556477666,
+          "latency_median_ms": 0.4582934780046344,
+          "latency_p95_ms": 0.6728545296937227,
+          "latency_p99_ms": 0.8408014639280734,
+          "qps": 2096.207736203799,
+          "memory_mb": 559.04,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 128
+          }
+        },
+        {
+          "method": "USearch (exp=256)",
+          "recall_at_1": 0.997,
+          "latency_mean_ms": 0.8335454193875194,
+          "latency_median_ms": 0.8241495816037059,
+          "latency_p95_ms": 1.092058722861111,
+          "latency_p99_ms": 1.2600521463900805,
+          "qps": 1199.6946737884898,
+          "memory_mb": 559.04,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 256
+          }
+        },
+        {
+          "method": "ScaNN (leaves=707)",
+          "recall_at_1": 0.976,
+          "latency_mean_ms": 0.43758811242878437,
+          "latency_median_ms": 0.43601542711257935,
+          "latency_p95_ms": 0.4626831505447626,
+          "latency_p99_ms": 0.4775677202269435,
+          "qps": 2285.2540359234413,
+          "memory_mb": 61.04,
+          "memory_note": "quantized vectors (estimated ~0.25x raw)",
+          "index_type": "scann",
+          "params": {
+            "n_leaves": 707,
+            "reorder_k": 100
+          }
+        },
+        {
+          "method": "FaceFlash (256b/100c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 3.1394405553583056,
+          "latency_median_ms": 3.13382048625499,
+          "latency_p95_ms": 3.1903566094115376,
+          "latency_p99_ms": 3.2555137318558987,
+          "qps": 318.5280888001619,
+          "memory_mb": 15.26,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 256,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "FaceFlash (256b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 3.5045760446228087,
+          "latency_median_ms": 3.180510480888188,
+          "latency_p95_ms": 4.806848848238587,
+          "latency_p99_ms": 4.86246956512332,
+          "qps": 285.3412188142798,
+          "memory_mb": 15.26,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 256,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "FaceFlash (384b/100c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 4.056195903802291,
+          "latency_median_ms": 4.0516299195587635,
+          "latency_p95_ms": 4.114973719697446,
+          "latency_p99_ms": 4.176387267652899,
+          "qps": 246.53641582316004,
+          "memory_mb": 22.89,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 384,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "FaceFlash (384b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 4.090215523028746,
+          "latency_median_ms": 4.081389051862061,
+          "latency_p95_ms": 4.1446874383836985,
+          "latency_p99_ms": 4.285755278542638,
+          "qps": 244.4858942932949,
+          "memory_mb": 22.89,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 384,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "FaceFlash (512b/100c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.6976493638940156,
+          "latency_median_ms": 1.6089604469016194,
+          "latency_p95_ms": 1.66964988457039,
+          "latency_p99_ms": 2.315003925468772,
+          "qps": 589.0497892369428,
+          "memory_mb": 30.52,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "FaceFlash (512b/200c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.6209926344454288,
+          "latency_median_ms": 1.619600923731923,
+          "latency_p95_ms": 1.6722406959161162,
+          "latency_p99_ms": 1.6931968065910041,
+          "qps": 616.9059493241425,
+          "memory_mb": 30.52,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 200
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "FaceFlash (512b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.6447378653101623,
+          "latency_median_ms": 1.6441280022263527,
+          "latency_p95_ms": 1.6985010006465018,
+          "latency_p99_ms": 1.718831469770521,
+          "qps": 607.9996217582195,
+          "memory_mb": 30.52,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "FaceFlash (512b/100c, mmap rerank)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.6572566060349345,
+          "latency_median_ms": 1.637438079342246,
+          "latency_p95_ms": 1.7239711945876477,
+          "latency_p99_ms": 2.5639701704494655,
+          "qps": 603.4068570663584,
+          "memory_mb": 30.52,
+          "memory_note": "binary index in RAM; floats on disk, rerank pages in ~100 rows/query (warm page cache)",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "mmap_rerank": true
+          },
+          "float_store_disk_mb": 976.56
+        },
+        {
+          "method": "FaceFlash (512b/100c, parallel)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.6742294642608613,
+          "latency_median_ms": 1.6668214229866862,
+          "latency_p95_ms": 1.7560306354425848,
+          "latency_p99_ms": 1.8188780336640775,
+          "qps": 597.2896913754173,
+          "memory_mb": 30.52,
+          "memory_note": "binary index only; multi-core Hamming scan",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "parallel": true
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "FaceFlash (512b/100c, batched)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.11000278010033071,
+          "latency_median_ms": 0.11000278010033071,
+          "latency_p95_ms": 0.11000278010033071,
+          "latency_p99_ms": 0.11000278010033071,
+          "qps": 9090.679336357915,
+          "memory_mb": 30.52,
+          "memory_note": "binary index only; batched multi-core scan (bulk throughput)",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "batched": true
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "FAISS-BinaryFlat + rerank",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.8646318472456187,
+          "latency_median_ms": 0.8499480318278074,
+          "latency_p95_ms": 0.8640051237307489,
+          "latency_p99_ms": 1.6343627334572375,
+          "qps": 1156.5616084876028,
+          "memory_mb": 30.52,
+          "memory_note": "measured (write_index_binary file size); same 64-byte PCA+ITQ codes as FaceFlash, same cosine rerank",
+          "index_type": "binary_flat",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "same_codes": true
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "FAISS-BinaryHNSW + rerank",
+          "recall_at_1": 0.78,
+          "latency_mean_ms": 0.1461250358261168,
+          "latency_median_ms": 0.14067499432712793,
+          "latency_p95_ms": 0.21428331965580583,
+          "latency_p99_ms": 0.2658029017038643,
+          "qps": 6843.454267412202,
+          "memory_mb": 160.28,
+          "memory_note": "measured (write_index_binary file size); same 64-byte PCA+ITQ codes as FaceFlash, same cosine rerank",
+          "index_type": "binary_hnsw",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "same_codes": true
+          },
+          "float_vectors_mb": 976.56
+        },
+        {
+          "method": "HNSWLIB (ef=128, batched)",
+          "recall_at_1": 0.998,
+          "latency_mean_ms": 0.16536417114548385,
+          "latency_median_ms": 0.16536417114548385,
+          "latency_p95_ms": 0.16536417114548385,
+          "latency_p99_ms": 0.16536417114548385,
+          "qps": 6047.259167889648,
+          "memory_mb": 1108.31,
+          "memory_note": "vectors + graph (measured); batched multi-core throughput",
+          "index_type": "hnsw",
+          "params": {
+            "batched": true
+          }
+        },
+        {
+          "method": "USearch (exp=128, batched)",
+          "recall_at_1": 0.996,
+          "latency_mean_ms": 0.020142330089583993,
+          "latency_median_ms": 0.020142330089583993,
+          "latency_p95_ms": 0.020142330089583993,
+          "latency_p99_ms": 0.020142330089583993,
+          "qps": 49646.68911453895,
+          "memory_mb": 559.04,
+          "memory_note": "vectors + graph (measured); batched multi-core throughput",
+          "index_type": "hnsw",
+          "params": {
+            "batched": true
+          }
+        }
+      ]
+    },
+    "1M": {
+      "n_database": 1000000,
+      "n_queries": 1000,
+      "n_identities": 44291,
+      "tiled": true,
+      "n_unique_vectors": 644019,
+      "faiss_flat_ms": 51.59574615373276,
+      "methods": [
+        {
+          "method": "FAISS-Flat (exact)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 51.59574615373276,
+          "latency_median_ms": 48.36980393156409,
+          "latency_p95_ms": 73.20201029069722,
+          "latency_p99_ms": 81.5907392767258,
+          "qps": 19.3814427456953,
+          "memory_mb": 1953.12,
+          "memory_note": "full float vectors (exact \u2014 flat index stores vectors verbatim)",
+          "index_type": "brute_force"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=16)",
+          "recall_at_1": 0.909,
+          "latency_mean_ms": 2.863043091725558,
+          "latency_median_ms": 2.849791548214853,
+          "latency_p95_ms": 3.1731676310300827,
+          "latency_p99_ms": 3.397691147401929,
+          "qps": 349.27871078506865,
+          "memory_mb": 1961.26,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=32)",
+          "recall_at_1": 0.959,
+          "latency_mean_ms": 5.826481574214995,
+          "latency_median_ms": 5.816182470880449,
+          "latency_p95_ms": 6.241802440490574,
+          "latency_p99_ms": 6.428043965715915,
+          "qps": 171.6301660380228,
+          "memory_mb": 1961.26,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "FAISS-IVF (nprobe=64)",
+          "recall_at_1": 0.984,
+          "latency_mean_ms": 11.574723337078467,
+          "latency_median_ms": 11.434750515036285,
+          "latency_p95_ms": 12.381542532239108,
+          "latency_p99_ms": 15.338118686340747,
+          "qps": 86.39515354951078,
+          "memory_mb": 1961.26,
+          "memory_note": "measured (faiss.write_index file size)",
+          "index_type": "ivf"
+        },
+        {
+          "method": "HNSWLIB (ef=32)",
+          "recall_at_1": 0.994,
+          "latency_mean_ms": 0.18354119709692895,
+          "latency_median_ms": 0.17610250506550074,
+          "latency_p95_ms": 0.2771168597973883,
+          "latency_p99_ms": 0.33666658448055387,
+          "qps": 5448.368082027358,
+          "memory_mb": 2216.65,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 32
+          }
+        },
+        {
+          "method": "HNSWLIB (ef=64)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.3398580108769238,
+          "latency_median_ms": 0.3331574844196439,
+          "latency_p95_ms": 0.4436326446011662,
+          "latency_p99_ms": 0.5471102311275899,
+          "qps": 2942.4052633619985,
+          "memory_mb": 2216.65,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 64
+          }
+        },
+        {
+          "method": "HNSWLIB (ef=128)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.6496337950229645,
+          "latency_median_ms": 0.6492733955383301,
+          "latency_p95_ms": 0.7810255279764533,
+          "latency_p99_ms": 0.8623141422867775,
+          "qps": 1539.3287844032961,
+          "memory_mb": 2216.65,
+          "memory_note": "measured (save_index file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "M": 32,
+            "ef_construction": 200,
+            "ef_search": 128
+          }
+        },
+        {
+          "method": "USearch (exp=64)",
+          "recall_at_1": 0.957,
+          "latency_mean_ms": 0.3050314635038376,
+          "latency_median_ms": 0.28664758428931236,
+          "latency_p95_ms": 0.5037671304307877,
+          "latency_p99_ms": 0.6062622158788143,
+          "qps": 3278.3503331531538,
+          "memory_mb": 1118.29,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 64
+          }
+        },
+        {
+          "method": "USearch (exp=128)",
+          "recall_at_1": 0.993,
+          "latency_mean_ms": 0.5401244803797454,
+          "latency_median_ms": 0.514702987857163,
+          "latency_p95_ms": 0.8088571019470691,
+          "latency_p99_ms": 0.9795595286414025,
+          "qps": 1851.4250627872484,
+          "memory_mb": 1118.29,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 128
+          }
+        },
+        {
+          "method": "USearch (exp=256)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 0.9428877749014646,
+          "latency_median_ms": 0.9299524826928973,
+          "latency_p95_ms": 1.3400701573118567,
+          "latency_p99_ms": 1.5445263125002384,
+          "qps": 1060.571604191712,
+          "memory_mb": 1118.29,
+          "memory_note": "measured (index.save file size: vectors + graph)",
+          "index_type": "hnsw",
+          "params": {
+            "expansion_search": 256
+          }
+        },
+        {
+          "method": "ScaNN (leaves=1000)",
+          "recall_at_1": 0.98,
+          "latency_mean_ms": 0.8347963090054691,
+          "latency_median_ms": 0.8350859861820936,
+          "latency_p95_ms": 0.8754860609769821,
+          "latency_p99_ms": 0.8956710761412978,
+          "qps": 1197.8970069852676,
+          "memory_mb": 122.07,
+          "memory_note": "quantized vectors (estimated ~0.25x raw)",
+          "index_type": "scann",
+          "params": {
+            "n_leaves": 1000,
+            "reorder_k": 100
+          }
+        },
+        {
+          "method": "FaceFlash (256b/100c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 6.251944133080542,
+          "latency_median_ms": 6.248280988074839,
+          "latency_p95_ms": 6.35001917835325,
+          "latency_p99_ms": 6.410445091314614,
+          "qps": 159.9502456697844,
+          "memory_mb": 30.52,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 256,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "FaceFlash (256b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 6.317793498048559,
+          "latency_median_ms": 6.299843429587781,
+          "latency_p95_ms": 6.417293101549149,
+          "latency_p99_ms": 6.516443293076009,
+          "qps": 158.28310949208458,
+          "memory_mb": 30.52,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 256,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "FaceFlash (384b/100c)",
+          "recall_at_1": 0.999,
+          "latency_mean_ms": 8.090417855186388,
+          "latency_median_ms": 8.079492952674627,
+          "latency_p95_ms": 8.214422897435725,
+          "latency_p99_ms": 8.362089667934924,
+          "qps": 123.60301011633742,
+          "memory_mb": 45.78,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 384,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "FaceFlash (384b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 8.12993672862649,
+          "latency_median_ms": 8.11411498580128,
+          "latency_p95_ms": 8.236454450525343,
+          "latency_p99_ms": 8.302572711836547,
+          "qps": 123.00218727150472,
+          "memory_mb": 45.78,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 384,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "FaceFlash (512b/100c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 3.4024294822011143,
+          "latency_median_ms": 3.3329171128571033,
+          "latency_p95_ms": 3.456710383761674,
+          "latency_p99_ms": 3.5090940888039768,
+          "qps": 293.9076343040255,
+          "memory_mb": 61.04,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "FaceFlash (512b/200c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 3.3068638590630144,
+          "latency_median_ms": 3.2726115314289927,
+          "latency_p95_ms": 3.498290467541665,
+          "latency_p99_ms": 3.5438984585925937,
+          "qps": 302.4013211972221,
+          "memory_mb": 61.04,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 200
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "FaceFlash (512b/300c)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 3.2652227312792093,
+          "latency_median_ms": 3.249973524361849,
+          "latency_p95_ms": 3.429921669885516,
+          "latency_p99_ms": 3.5222343099303544,
+          "qps": 306.2578213793802,
+          "memory_mb": 61.04,
+          "memory_note": "binary index only; rerank reads RAM-resident floats in this row \u2014 see the mmap-rerank row for the floats-on-disk deployment mode",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 300
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "FaceFlash (512b/100c, mmap rerank)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 3.257197242230177,
+          "latency_median_ms": 3.253118018619716,
+          "latency_p95_ms": 3.3667545882053673,
+          "latency_p99_ms": 3.412624194752425,
+          "qps": 307.01241761929896,
+          "memory_mb": 61.04,
+          "memory_note": "binary index in RAM; floats on disk, rerank pages in ~100 rows/query (warm page cache)",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "mmap_rerank": true
+          },
+          "float_store_disk_mb": 1953.12
+        },
+        {
+          "method": "FaceFlash (512b/100c, parallel)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 3.2472742192912847,
+          "latency_median_ms": 3.2461824594065547,
+          "latency_p95_ms": 3.389186121057719,
+          "latency_p99_ms": 3.5150742740370324,
+          "qps": 307.9505863900368,
+          "memory_mb": 61.04,
+          "memory_note": "binary index only; multi-core Hamming scan",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "parallel": true
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "FaceFlash (512b/100c, batched)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.19775660196319222,
+          "latency_median_ms": 0.19775660196319222,
+          "latency_p95_ms": 0.19775660196319222,
+          "latency_p99_ms": 0.19775660196319222,
+          "qps": 5056.721191973791,
+          "memory_mb": 61.04,
+          "memory_note": "binary index only; batched multi-core scan (bulk throughput)",
+          "index_type": "binary_hash",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "batched": true
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "FAISS-BinaryFlat + rerank",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 1.7105582903604954,
+          "latency_median_ms": 1.709564938209951,
+          "latency_p95_ms": 1.7225506249815226,
+          "latency_p99_ms": 1.7326610116288066,
+          "qps": 584.6044567059172,
+          "memory_mb": 61.04,
+          "memory_note": "measured (write_index_binary file size); same 64-byte PCA+ITQ codes as FaceFlash, same cosine rerank",
+          "index_type": "binary_flat",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "same_codes": true
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "FAISS-BinaryHNSW + rerank",
+          "recall_at_1": 0.617,
+          "latency_mean_ms": 0.12667290423996747,
+          "latency_median_ms": 0.1214764779433608,
+          "latency_p95_ms": 0.19224436255171895,
+          "latency_p99_ms": 0.22128115175291893,
+          "qps": 7894.348092829808,
+          "memory_mb": 320.56,
+          "memory_note": "measured (write_index_binary file size); same 64-byte PCA+ITQ codes as FaceFlash, same cosine rerank",
+          "index_type": "binary_hnsw",
+          "params": {
+            "n_bits": 512,
+            "n_candidates": 100,
+            "same_codes": true
+          },
+          "float_vectors_mb": 1953.12
+        },
+        {
+          "method": "HNSWLIB (ef=128, batched)",
+          "recall_at_1": 1.0,
+          "latency_mean_ms": 0.17549102008342743,
+          "latency_median_ms": 0.17549102008342743,
+          "latency_p95_ms": 0.17549102008342743,
+          "latency_p99_ms": 0.17549102008342743,
+          "qps": 5698.297266290923,
+          "memory_mb": 2216.65,
+          "memory_note": "vectors + graph (measured); batched multi-core throughput",
+          "index_type": "hnsw",
+          "params": {
+            "batched": true
+          }
+        },
+        {
+          "method": "USearch (exp=128, batched)",
+          "recall_at_1": 0.986,
+          "latency_mean_ms": 0.017404339043423533,
+          "latency_median_ms": 0.017404339043423533,
+          "latency_p95_ms": 0.017404339043423533,
+          "latency_p99_ms": 0.017404339043423533,
+          "qps": 57456.936313698374,
+          "memory_mb": 1118.29,
+          "memory_note": "vectors + graph (measured); batched multi-core throughput",
+          "index_type": "hnsw",
+          "params": {
+            "batched": true
+          }
+        }
+      ]
+    }
+  },
+  "timestamp": "2026-07-02 20:58:10"
+}

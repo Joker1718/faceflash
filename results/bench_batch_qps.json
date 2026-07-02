@@ -1,6 +1,6 @@
 {
   "benchmark": "Batch QPS (per-query vs cache-blocked batched scan) \u2014 REAL data",
-  "backend": "faceflash_core (Rust, POPCNT-accelerated)",
+  "backend": "faceflash._core (Rust, SIMD-accelerated)",
   "simd_kernel": "AVX-512 VPOPCNTDQ (native 512-bit popcount)",
   "cpu": {
     "arch": "x86_64",
@@ -24,11 +24,11 @@
       "queries": 1000,
       "n_candidates": 100,
       "reps": 5,
-      "per_query_qps": 3685.7,
-      "batched_serial_qps": 4325.6,
-      "batched_parallel_qps": 37569.5,
-      "speedup_serial": 1.17,
-      "speedup_parallel": 10.19,
+      "per_query_qps": 3223.0,
+      "batched_serial_qps": 4074.3,
+      "batched_parallel_qps": 35607.8,
+      "speedup_serial": 1.26,
+      "speedup_parallel": 11.05,
       "tiled": false
     },
     "200K": {
@@ -39,11 +39,11 @@
       "queries": 1000,
       "n_candidates": 100,
       "reps": 3,
-      "per_query_qps": 1852.4,
-      "batched_serial_qps": 2268.8,
-      "batched_parallel_qps": 19216.2,
-      "speedup_serial": 1.22,
-      "speedup_parallel": 10.37,
+      "per_query_qps": 1634.3,
+      "batched_serial_qps": 2049.2,
+      "batched_parallel_qps": 18572.7,
+      "speedup_serial": 1.25,
+      "speedup_parallel": 11.36,
       "tiled": false
     },
     "300K": {
@@ -54,11 +54,11 @@
       "queries": 1000,
       "n_candidates": 100,
       "reps": 3,
-      "per_query_qps": 1231.3,
-      "batched_serial_qps": 1543.7,
-      "batched_parallel_qps": 19597.7,
-      "speedup_serial": 1.25,
-      "speedup_parallel": 15.92,
+      "per_query_qps": 1087.5,
+      "batched_serial_qps": 1391.8,
+      "batched_parallel_qps": 12285.1,
+      "speedup_serial": 1.28,
+      "speedup_parallel": 11.3,
       "tiled": false
     },
     "500K": {
@@ -69,11 +69,11 @@
       "queries": 1000,
       "n_candidates": 100,
       "reps": 3,
-      "per_query_qps": 688.6,
-      "batched_serial_qps": 944.9,
-      "batched_parallel_qps": 11765.0,
-      "speedup_serial": 1.37,
-      "speedup_parallel": 17.08,
+      "per_query_qps": 620.0,
+      "batched_serial_qps": 884.9,
+      "batched_parallel_qps": 10594.5,
+      "speedup_serial": 1.43,
+      "speedup_parallel": 17.09,
       "tiled": false
     },
     "1M": {
@@ -84,11 +84,11 @@
       "queries": 1000,
       "n_candidates": 100,
       "reps": 2,
-      "per_query_qps": 348.6,
-      "batched_serial_qps": 488.2,
-      "batched_parallel_qps": 6021.1,
-      "speedup_serial": 1.4,
-      "speedup_parallel": 17.27,
+      "per_query_qps": 301.8,
+      "batched_serial_qps": 451.1,
+      "batched_parallel_qps": 5430.9,
+      "speedup_serial": 1.49,
+      "speedup_parallel": 18.0,
       "tiled": true
     }
   }
