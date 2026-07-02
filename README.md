@@ -2,7 +2,7 @@
 
 Face search that keeps 1M faces in 61 MB of RAM at the same recall@1 as exact brute-force cosine. ArcFace embeddings are stored as 512-bit binary codes instead of full float vectors, scanned by Hamming distance, and the top ~100 candidates are reranked with exact cosine.
 
-One thing to understand up front: the 61 MB is the in-RAM index. The original float vectors (~2 GB at 1M) stay on disk, and the rerank pages in ~100 rows per query. So it's 61 MB of RAM plus 2 GB of disk — not 61 MB total. RAM is usually the scarce resource, which is why the number is framed that way.
+One thing to understand up front: the 61 MB is the in-RAM index. The original float vectors (~2 GB at 1M) stay on disk — since v0.2 in a single SQLite file — and the rerank reads only the ~100 candidate rows per query. So it's 61 MB of RAM plus ~2 GB of disk, not 61 MB total. RAM is usually the scarce resource, which is why the number is framed that way.
 
 This is a compression + packaging project, not a new search algorithm. The search is a brute-force Hamming scan (same as FAISS `IndexBinaryFlat`) plus a cosine rerank. You could build the same pipeline from `faiss.PCAMatrix` + `IndexBinaryFlat` + manual reranking; FaceFlash packages it behind one API and tunes the SIMD kernel. The reason it works without losing accuracy is that ArcFace embeddings are low-rank, so PCA+ITQ binary codes preserve nearest-neighbor ordering. On general or random vectors this does not hold (see [Limitations](#limitations)).
 
@@ -17,11 +17,11 @@ This is a compression + packaging project, not a new search algorithm. The searc
 ```python
 from faceflash import FaceFlash
 
-ff = FaceFlash()                       # downloads ArcFace model (~166 MB) on first run
-ff.register("Alice", "alice.jpg")      # the name is the label you get back
+ff = FaceFlash("faces.db")             # single SQLite file; created if missing.
+                                       # (downloads ArcFace model ~166 MB on first run)
+ff.register("Alice", "alice.jpg")      # persisted immediately — no save() needed
 ff.register("Bob", "bob.jpg")
 ff.register_folder("employees/")       # bulk enroll (folder/person_name/photo.jpg)
-ff.save("my_index/")
 
 result = ff.search("query.jpg")        # detect → embed → binary search → cosine rerank
 # {"matches": [{"name": "Alice", "confidence": 0.92}], ...}
@@ -29,8 +29,10 @@ result = ff.search("query.jpg")        # detect → embed → binary search → 
 ff.verify("photo1.jpg", "photo2.jpg")  # 1:1 — same person?
 # {"match": True, "confidence": 0.87}
 
-ff.remove("Bob")                       # GDPR / right-to-be-forgotten
+ff.remove("Bob")                       # deletes from the .db file too (GDPR)
 ```
+
+Reopen `faces.db` tomorrow and keep adding faces — streaming insertion needs no PCA refit and no file rewrite. Binary codes load into RAM at open (~92ms at 100K); float embeddings stay on disk and the rerank fetches only the ~100 candidate rows per query, which costs about +0.2ms over RAM-resident floats. If you want the old explicit-snapshot workflow, `ff.save("my_index/")` still writes the .npy directory format, and either format converts to the other via `save()`/`load()`.
 
 There's also a batch path (`ff.index.search_batch(embeddings, k=1)`) for bulk dedup, watchlists, and video frames — roughly 11× the throughput of one-at-a-time at 100K.
 
@@ -254,7 +256,7 @@ rust/src/lib.rs       AVX-512 VPOPCNTDQ / NEON / scalar POPCNT kernels
 
 - Single-query latency at 1M+ is O(N); HNSW is ~5× faster there (0.65ms vs 3.40ms). The batched path ties. FAISS IndexBinaryFlat also scans the same codes ~2× faster single-query.
 - The RAM number is not the storage number: 61 MB @ 1M in RAM, ~2 GB of floats on disk for reranking.
-- Building the index holds all floats in RAM; the savings apply after `save()`/`load()`, when floats move to mmap'd disk.
+- With the SQLite backend, floats never enter RAM (fetched per query, ~+0.2ms). The legacy in-memory index holds all floats in RAM until `save()`/`load()` moves them to mmap'd disk. Batched throughput is lower on the SQLite path (~3K vs ~14K qps at 100K) — use the legacy format for bulk identification jobs.
 - The rerank pages ~100 float rows from disk per query — on NVMe this measured indistinguishable from RAM-resident floats (3.26ms vs 3.40ms at 1M); slow storage adds more.
 - The single-popcount kernel needs Ice Lake / Zen 4+ / EPYC 9004+; older CPUs fall back to AVX2 or scalar automatically.
 - The recall result is specific to face embeddings (low-rank). Don't expect it on arbitrary vectors.
@@ -281,7 +283,7 @@ pip install -e ".[cpu,benchmark]" && maturin develop --release
 python -m pytest tests/   # ~20s
 ```
 
-Things I haven't gotten to, roughly in order of how much I want them: a DiskANN comparison (the one competitor missing), mobile deployment (ONNX + CoreML), streaming insertion without a PCA refit, Raspberry Pi / Jetson benchmarks, a WebAssembly build, GPU batched search. Issues are tagged; see [CONTRIBUTING.md](CONTRIBUTING.md). Done work lives in the [CHANGELOG](CHANGELOG.md).
+Things I haven't gotten to, roughly in order of how much I want them: a DiskANN comparison (the one competitor missing), mobile deployment (ONNX + CoreML), Raspberry Pi / Jetson benchmarks, a WebAssembly build, GPU batched search. (Streaming insertion shipped in v0.2 with the SQLite backend.) Issues are tagged; see [CONTRIBUTING.md](CONTRIBUTING.md). Done work lives in the [CHANGELOG](CHANGELOG.md).
 
 ## Credits
 

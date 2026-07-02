@@ -1,6 +1,6 @@
 """FaceFlash — face search in 3MB. PCA+ITQ binary codes + SIMD Hamming scan."""
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 import logging as _logging
 _logging.getLogger("faceflash").addHandler(_logging.NullHandler())

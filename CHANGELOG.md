@@ -4,7 +4,27 @@ All notable changes to FaceFlash are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-07-02
+
+### Added
+- **SQLite backend — single-file, write-through, streaming insertion.**
+  `FaceFlash("faces.db")` / `FaceIndex(db_path="faces.db")` opens (or creates)
+  a single .db file: every add is a transactional INSERT (WAL, crash-safe),
+  binary codes load into one contiguous RAM arena at open (92ms at 100K),
+  and float embeddings stay on disk — the rerank fetches only the ~100
+  candidate rows per query. Streaming insertion now just works: reopen the
+  file, add faces, no PCA refit, no file rewrite, nothing to save().
+  remove() is a DELETE — the embedding actually leaves the disk file.
+  Measured cost of reranking from SQLite: +0.23ms/query at 100K vs
+  RAM-resident floats (single query); batched throughput 3.2K qps vs 14K
+  resident. The legacy .npy directory format still works and migrates both
+  ways via save()/load(). 16 KB pages (a face row is ~2.1 KB; default 4 KB
+  pages fit one row each and waste half the file).
+- Appends use geometric-growth arenas in both backends — the old
+  vstack-per-flush pattern copied the entire array on every 256-add flush
+  (amortized-quadratic).
+- `benchmarks/bench_far_frr.py` — FAR/FRR at cosine thresholds (LFW pairs),
+  documenting what the 0.4 default threshold means in error rates.
 
 ### Fixed
 - **Model download was broken**: the ArcFace URL returned 401; now points at
@@ -44,10 +64,6 @@ adheres to [Semantic Versioning](https://semver.org/).
   same-codes FAISS BinaryFlat/BinaryHNSW baselines, and record tiling.
 - `embed_batch` does real stacked ONNX inference on CPU/CUDA (looped on
   CoreML, where per-shape compilation makes batching slower).
-
-### Added
-- `benchmarks/bench_far_frr.py` — FAR/FRR at cosine thresholds (LFW pairs),
-  documenting what the 0.4 default threshold means in error rates.
 
 ## [0.1.0] - 2026-06-27
 

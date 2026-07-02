@@ -20,15 +20,21 @@ class FaceFlash:
     def __init__(self, index_path: Optional[str] = None,
                  n_bits: int = 512, n_candidates: int = 100):
         """
+        index_path: a .db file opens (or creates) the write-through SQLite
+            backend — every register() persists immediately, no save() needed.
+            A directory path loads a legacy .npy snapshot if it exists.
         n_bits: code length. 512 = full recall, 256 = half memory / ~99% recall.
         n_candidates: how many to shortlist before float rerank. Tradeoff knob.
         """
         self._embedder: Optional[FaceEmbedder] = None
         self._attributes: Optional[FaceAttributes] = None
         self.n_candidates = n_candidates
-        self.index = FaceIndex(n_bits=n_bits)
-        if index_path and Path(index_path).exists():
-            self.index.load(index_path)
+        if index_path and str(index_path).endswith(".db"):
+            self.index = FaceIndex(n_bits=n_bits, db_path=str(index_path))
+        else:
+            self.index = FaceIndex(n_bits=n_bits)
+            if index_path and Path(index_path).exists():
+                self.index.load(index_path)
 
     @property
     def embedder(self) -> FaceEmbedder:
