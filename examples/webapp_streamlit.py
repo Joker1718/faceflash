@@ -199,57 +199,82 @@ def main():
                                           key="stream_run")
 
             # ── Zone configuration ──────────────────────────────────────────
-            with st.expander("Define zones (optional)"):
-                st.caption("Draw restricted areas, entrances, etc. Faces entering/exiting zones trigger events.")
+            with st.expander("Draw zones (click to define areas)"):
+                st.caption("Capture a frame, then draw polygons to define zones.")
 
-                # Simple coordinate-based zone input
-                zone_name = st.text_input("Zone name", placeholder="e.g. entrance", key="zone_name")
-                zone_coords = st.text_input(
-                    "Polygon coordinates (x1,y1 x2,y2 x3,y3 ...)",
-                    placeholder="0,0 300,0 300,400 0,400",
-                    key="zone_coords",
-                    help="Pixel coordinates. Capture a frame first to see dimensions."
-                )
+                # Capture a single frame for drawing on
+                if st.button("Capture frame for zone drawing", key="btn_capture_zone"):
+                    try:
+                        import cv2
+                        cap = cv2.VideoCapture(0)
+                        ret, frame = cap.read()
+                        cap.release()
+                        if ret:
+                            st.session_state["zone_frame"] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    except Exception as e:
+                        st.error(f"Cannot capture: {e}")
 
-                col_z1, col_z2 = st.columns(2)
-                with col_z1:
-                    is_secure = st.checkbox("Secure zone (anti-tailgating)", key="zone_secure")
-                with col_z2:
-                    zone_capacity = st.number_input("Max capacity (0 = no limit)", min_value=0,
-                                                     value=0, key="zone_cap")
+                if "zone_frame" in st.session_state:
+                    from streamlit_drawable_canvas import st_canvas
+                    from PIL import Image
 
-                if st.button("Add zone", key="btn_add_zone"):
-                    if zone_name and zone_coords:
-                        try:
-                            points = []
-                            for pair in zone_coords.strip().split():
-                                x, y = pair.split(",")
-                                points.append((int(x), int(y)))
-                            if len(points) < 3:
-                                st.error("Need at least 3 points.")
+                    frame_img = Image.fromarray(st.session_state["zone_frame"])
+                    w, h = frame_img.size
+
+                    zone_name = st.text_input("Zone name", placeholder="e.g. entrance",
+                                              key="zone_draw_name")
+                    is_secure = st.checkbox("Secure zone (anti-tailgating)",
+                                            key="zone_draw_secure")
+
+                    st.caption("Draw a polygon (click points, close the shape):")
+                    canvas_result = st_canvas(
+                        fill_color="rgba(255, 255, 0, 0.2)",
+                        stroke_width=2,
+                        stroke_color="#FFFF00",
+                        background_image=frame_img,
+                        drawing_mode="polygon",
+                        height=h,
+                        width=w,
+                        key="zone_canvas",
+                    )
+
+                    if st.button("Save zone", key="btn_save_zone"):
+                        if not zone_name:
+                            st.warning("Enter a zone name first.")
+                        elif canvas_result.json_data and canvas_result.json_data["objects"]:
+                            # Extract polygon points from canvas
+                            obj = canvas_result.json_data["objects"][-1]  # last drawn shape
+                            if obj.get("type") == "path":
+                                # path format: [["M", x, y], ["L", x, y], ...]
+                                points = []
+                                for cmd in obj["path"]:
+                                    if len(cmd) >= 3:
+                                        points.append((int(cmd[1]), int(cmd[2])))
+                                if len(points) >= 3:
+                                    zones = st.session_state.get("zones", [])
+                                    zones.append({
+                                        "name": zone_name,
+                                        "polygon": points,
+                                        "secure": is_secure,
+                                    })
+                                    st.session_state["zones"] = zones
+                                    st.success(f"Zone '{zone_name}' saved ({len(points)} points)")
+                                else:
+                                    st.error("Draw at least 3 points.")
                             else:
-                                zones = st.session_state.get("zones", [])
-                                zones.append({
-                                    "name": zone_name,
-                                    "polygon": points,
-                                    "secure": is_secure,
-                                    "capacity": zone_capacity if zone_capacity > 0 else None
-                                })
-                                st.session_state["zones"] = zones
-                                st.success(f"Zone '{zone_name}' added ({len(points)} points)")
-                        except Exception as e:
-                            st.error(f"Bad format: {e}. Use: x1,y1 x2,y2 x3,y3")
-                    else:
-                        st.warning("Enter zone name and coordinates.")
+                                st.error("Draw a polygon (use polygon mode).")
+                        else:
+                            st.warning("Draw a polygon on the image first.")
+                else:
+                    st.info("Click 'Capture frame' to get a snapshot for zone drawing.")
 
                 # Show defined zones
                 zones = st.session_state.get("zones", [])
                 if zones:
-                    st.write("**Defined zones:**")
-                    for i, z in enumerate(zones):
-                        st.caption(f"  {z['name']}: {z['polygon']}"
-                                   + (" [SECURE]" if z['secure'] else "")
-                                   + (f" [max {z['capacity']}]" if z['capacity'] else ""))
+                    st.write("**Active zones:**")
+                    for z in zones:
+                        st.caption(f"  {z['name']}: {len(z['polygon'])} points"
+                                   + (" [SECURE]" if z.get('secure') else ""))
                     if st.button("Clear all zones", key="btn_clear_zones"):
                         st.session_state["zones"] = []
                         st.rerun()
