@@ -61,7 +61,7 @@ def test_tracker_box_smoothing_damps_jitter():
 
 def test_display_grace_keeps_track_visible_through_missed_frames():
     ff_stub = type("E", (), {"n_candidates": 100})()
-    mon = StreamMonitor(ff_stub, display_grace=3)
+    mon = StreamMonitor(ff_stub, display_grace=3, min_track_frames=1)
     mon.tracker.update([(0, 0, 50, 50)], timestamp=1.0)
     assert len(mon._visible_tracks()) == 1
     mon.tracker.update([], timestamp=2.0)   # detector blinks
@@ -110,8 +110,8 @@ def test_detect_returns_empty_on_blank_frame():
     ff_stub = type("E", (), {"n_candidates": 100})()
     mon = StreamMonitor(ff_stub)
     blank = np.zeros((240, 320, 3), dtype=np.uint8)
-    boxes, crops = mon._detect(blank)
-    assert boxes == [] and crops == {}
+    boxes, crops, scores = mon._detect(blank)
+    assert boxes == [] and crops == {} and scores == {}
 
 
 # ── v0.2 stream upgrades: reader, re-ID, persistence, webhooks ──────────────
@@ -281,3 +281,13 @@ def test_monitor_report_includes_visitor_count():
     r = mon.report()
     assert r["unique_unregistered_visitors"] == 1
     assert "attendance" in r
+
+
+def test_ghost_boxes_hidden_until_confirmed():
+    """A single-frame false positive never gets drawn (min_track_frames)."""
+    ff_stub = type("E", (), {"n_candidates": 100})()
+    mon = StreamMonitor(ff_stub, min_track_frames=2)
+    mon.tracker.update([(0, 0, 50, 50)], timestamp=1.0)
+    assert len(mon._visible_tracks()) == 0      # tentative — not drawn yet
+    mon.tracker.update([(2, 0, 52, 50)], timestamp=2.0)
+    assert len(mon._visible_tracks()) == 1      # confirmed on 2nd sighting

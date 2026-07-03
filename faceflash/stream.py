@@ -491,7 +491,10 @@ class StreamMonitor:
                  persist_events: bool = True,
                  det_size: int = 480,
                  det_model: str = "10g",
-                 display_grace: int = 4):
+                 display_grace: int = 4,
+                 min_track_frames: int = 2,
+                 min_det_score: float = 0.55,
+                 idle_fps: float = 1.0):
         """
         engine: a FaceFlash instance with a loaded gallery.
         sample_fps: how many frames/sec to process (lower = less CPU).
@@ -520,6 +523,15 @@ class StreamMonitor:
             saw it. Detectors blink on single frames constantly; without
             grace, boxes/names flash on and off and person_left/appeared
             events churn. 0 restores the strict old behavior.
+        min_track_frames: a new track must be detected this many times before
+            it's drawn or counted — kills ghost boxes from single-frame
+            false positives.
+        min_det_score: don't spend embedding+search on detections below this
+            confidence; they're usually junk crops that mis-identify.
+        idle_fps: processing rate while NO faces are tracked (live sources).
+            An attendance camera is idle most of the day — no point burning
+            sample_fps worth of detection on empty frames. Ramps back to
+            sample_fps the moment a face appears.
         """
         self.engine = engine
         self.sample_fps = sample_fps
@@ -542,6 +554,9 @@ class StreamMonitor:
         self.det_size = det_size
         self.det_model = det_model
         self.display_grace = display_grace
+        self.min_track_frames = min_track_frames
+        self.min_det_score = min_det_score
+        self.idle_fps = idle_fps
         self.visitors = _VisitorRegistry()
         self._detector = None          # lazy; False = tried and failed
 
@@ -650,7 +665,6 @@ class StreamMonitor:
         """Live sources: a capture thread drains the stream so processing
         never falls behind real time; frames are processed at sample_fps."""
         reader = _LatestFrameReader(cap)
-        min_gap = 1.0 / self.sample_fps
         last_proc = 0.0
         try:
             while self._running:
@@ -661,6 +675,10 @@ class StreamMonitor:
                     time.sleep(0.005)
                     continue
 
+                # Idle scenes don't deserve full detection rate: drop to
+                # idle_fps when nothing is tracked, snap back on first face.
+                rate = self.sample_fps if self.tracker.tracks else                     min(self.idle_fps, self.sample_fps)
+                min_gap = 1.0 / rate
                 now = time.time()
                 if now - last_proc < min_gap:
                     # Not due for processing — keep the display smooth
@@ -726,7 +744,7 @@ class StreamMonitor:
 
         # ONE detector pass: boxes for the tracker + aligned
         # crops for identification (no re-detection per track)
-        boxes, crop_by_box = self._detect(frame_rgb)
+        boxes, crop_by_box, score_by_box = self._detect(frame_rgb)
 
         # Update tracker (fast — just IOU matching)
         tracks = self.tracker.update(boxes, timestamp)
@@ -736,9 +754,10 @@ class StreamMonitor:
         # crops exist). All due tracks embed in ONE batched ONNX call.
         detected_now = [t for t in tracks if t.frames_missed == 0]
         due = [t for t in detected_now
-               if (t.identity is None and t.frames_seen >= 3)
-               or (t.identity is not None and
-                   t.frames_seen % self.identify_interval == 0)]
+               if score_by_box.get(tuple(t.box), 1.0) >= self.min_det_score
+               and ((t.identity is None and t.frames_seen >= 3)
+                    or (t.identity is not None and
+                        t.frames_seen % self.identify_interval == 0))]
         if due:
             self._identify_tracks(due, frame_rgb, crop_by_box)
 
@@ -782,9 +801,11 @@ class StreamMonitor:
         return r
 
     def _visible_tracks(self) -> List[Track]:
-        """Tracks to draw / count as present: detected recently enough."""
+        """Tracks to draw / count as present: seen enough times to be real
+        (no single-frame ghost boxes), detected recently enough (grace)."""
         return [t for t in self.tracker.tracks
-                if t.frames_missed <= self.display_grace]
+                if t.frames_seen >= self.min_track_frames
+                and t.frames_missed <= self.display_grace]
 
     def _get_detector(self):
         """Stream-owned SCRFD at det_size (the shared one is fixed at 640)."""
@@ -811,7 +832,7 @@ class StreamMonitor:
             try:
                 from faceflash.align import align_face
                 raw_boxes, kps = det.detect(frame_rgb)
-                boxes, crops = [], {}
+                boxes, crops, scores = [], {}, {}
                 for i in range(len(raw_boxes)):
                     crop = align_face(frame_rgb, kps[i])
                     if crop is None:
@@ -819,7 +840,8 @@ class StreamMonitor:
                     b = tuple(int(round(v)) for v in raw_boxes[i][:4])
                     boxes.append(b)
                     crops[b] = crop
-                return boxes, crops
+                    scores[b] = float(raw_boxes[i][4])
+                return boxes, crops, scores
             except Exception as e:
                 logger.debug("SCRFD detect failed: %s", e)
 
@@ -843,11 +865,12 @@ class StreamMonitor:
             if len(faces):
                 boxes = [(int(x), int(y), int(x + fw), int(y + fh))
                          for (x, y, fw, fh) in faces]
-                return _nms(boxes, iou_threshold=0.4), {}
+                boxes = _nms(boxes, iou_threshold=0.4)
+                return boxes, {}, {b: 1.0 for b in boxes}   # haar has no score
         except Exception:
             pass
 
-        return [], {}
+        return [], {}, {}
 
     def _face_for_track(self, track: Track, frame_rgb: np.ndarray,
                         crop_by_box: dict):
