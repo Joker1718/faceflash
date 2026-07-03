@@ -91,3 +91,129 @@ def test_detect_returns_empty_on_blank_frame():
     blank = np.zeros((240, 320, 3), dtype=np.uint8)
     boxes, crops = mon._detect(blank)
     assert boxes == [] and crops == {}
+
+
+# ── v0.2 stream upgrades: reader, re-ID, persistence, webhooks ──────────────
+
+def test_latest_frame_reader_returns_newest_and_ends():
+    from faceflash.stream import _LatestFrameReader
+    import time as _t
+
+    class FakeCap:
+        def __init__(self, n):
+            self.i, self.n = 0, n
+        def read(self):
+            if self.i >= self.n:
+                return False, None
+            self.i += 1
+            f = np.full((4, 4, 3), self.i, dtype=np.uint8)
+            _t.sleep(0.002)
+            return True, f
+
+    r = _LatestFrameReader(FakeCap(50))
+    _t.sleep(0.05)
+    alive, frame = r.read()
+    assert alive and frame is not None
+    first_seen = int(frame[0, 0, 0])
+    assert first_seen > 1          # older frames were dropped, not queued
+    # drains to the end and reports closed
+    deadline = _t.time() + 2.0
+    while _t.time() < deadline:
+        alive, frame = r.read()
+        if not alive and frame is None:
+            break
+        _t.sleep(0.005)
+    assert not alive
+    r.stop()
+
+
+def test_tracker_reid_recovers_lost_identity():
+    rng = np.random.default_rng(3)
+    emb = rng.standard_normal(512).astype(np.float32)
+    emb /= np.linalg.norm(emb)
+
+    tr = IOUTracker(iou_threshold=0.3, max_missed=1)
+    tracks = tr.update([(0, 0, 100, 100)], timestamp=1.0)
+    tracks[0].identity, tracks[0].confidence = "alice", 0.9
+    tracks[0].embedding = emb
+
+    # face disappears -> track dies into re-ID memory
+    tr.update([], timestamp=2.0)
+    tr.update([], timestamp=3.0)
+    assert len(tr.tracks) == 0 and len(tr.lost) == 1
+
+    # same face reappears elsewhere
+    m = tr.reid_match(emb, threshold=0.65)
+    assert m is not None and m.identity == "alice"
+    assert len(tr.lost) == 0       # consumed
+
+    # a different face does NOT match
+    tr2 = IOUTracker(max_missed=1)
+    t = tr2.update([(0, 0, 50, 50)], timestamp=1.0)[0]
+    t.embedding = emb
+    tr2.update([], 2.0); tr2.update([], 3.0)
+    other = rng.standard_normal(512).astype(np.float32)
+    other /= np.linalg.norm(other)
+    assert tr2.reid_match(other, threshold=0.65) is None
+
+
+def test_events_persist_to_gallery_db(tmp_path):
+    from faceflash.engine import FaceFlash
+    from faceflash.stream import StreamMonitor, StreamEvent
+
+    rng = np.random.default_rng(5)
+    embs = rng.standard_normal((1200, 512)).astype(np.float32)
+    embs /= np.linalg.norm(embs, axis=1, keepdims=True)
+    ff = FaceFlash(index_path=str(tmp_path / "g.db"))
+    ff.index.add_batch(embs, [f"p{i % 200}" for i in range(1200)])
+
+    mon = StreamMonitor(ff)
+    mon._emit(StreamEvent("person_appeared", 100.0, {"name": "p1"}))
+    mon._emit(StreamEvent("person_left", 160.0, {"name": "p1", "dwell_seconds": 60.0}))
+    mon._emit(StreamEvent("anomaly", 170.0, {"track_id": 9, "sightings": 3}))
+
+    evs = mon.events()
+    assert len(evs) == 3
+    assert evs[0]["event_type"] == "anomaly"           # newest first
+    assert mon.events(event_type="person_left")[0]["data"]["dwell_seconds"] == 60.0
+    assert len(mon.events(since=150.0)) == 2
+    ff.index.close()
+
+    # events survive restart (same .db)
+    ff2 = FaceFlash(index_path=str(tmp_path / "g.db"))
+    mon2 = StreamMonitor(ff2)
+    assert len(mon2.events()) == 3
+    ff2.index.close()
+
+
+def test_webhook_delivery():
+    import json as _json
+    import threading as _th
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from faceflash.stream import StreamMonitor, StreamEvent
+
+    received = []
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append(_json.loads(
+                self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(200); self.end_headers()
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    _th.Thread(target=srv.serve_forever, daemon=True).start()
+
+    ff_stub = type("E", (), {"n_candidates": 100})()
+    mon = StreamMonitor(ff_stub)
+    mon.on_event(f"http://127.0.0.1:{srv.server_port}/hook")
+    mon._emit(StreamEvent("person_appeared", 1.0, {"name": "bob"}))
+
+    import time as _t
+    deadline = _t.time() + 3.0
+    while not received and _t.time() < deadline:
+        _t.sleep(0.02)
+    srv.shutdown()
+    assert received and received[0]["event_type"] == "person_appeared"
+    assert received[0]["data"]["name"] == "bob"

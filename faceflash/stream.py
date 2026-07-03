@@ -5,6 +5,12 @@ Connects to a webcam or RTSP URL, samples frames, detects + tracks + identifies
 faces continuously, and provides analytics (crowd count, dwell time, visit
 frequency, anomaly alerts).
 
+Status: a working single-camera prototype — good for demos, personal
+projects, and small deployments. It is NOT a multi-camera production
+pipeline: no GPU batching, no failover, no certified anti-spoofing. If you
+need those, run a dedicated NVR (e.g. Frigate) and use FaceFlash as the
+recognition backend.
+
 Requires: opencv-python (cv2)
 
 Usage:
@@ -23,6 +29,8 @@ Usage:
 """
 
 import time
+import json
+import queue
 import logging
 import threading
 from collections import defaultdict
@@ -32,6 +40,85 @@ from typing import Optional, Callable, List, Dict, Any, Union
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+class _WebhookSender:
+    """Posts events as JSON to a URL from a worker thread.
+
+    A slow or dead endpoint must never stall the video loop, so events go
+    through a bounded queue; overflow drops the oldest event and logs.
+    """
+
+    def __init__(self, url: str, timeout: float = 3.0, max_queue: int = 256):
+        self.url = url
+        self.timeout = timeout
+        self._q: "queue.Queue" = queue.Queue(maxsize=max_queue)
+        t = threading.Thread(target=self._worker, daemon=True)
+        t.start()
+
+    def __call__(self, event: "StreamEvent"):
+        payload = {"event_type": event.event_type,
+                   "timestamp": event.timestamp,
+                   "data": event.data}
+        try:
+            self._q.put_nowait(payload)
+        except queue.Full:
+            try:
+                self._q.get_nowait()          # drop oldest
+                self._q.put_nowait(payload)
+            except queue.Empty:
+                pass
+            logger.warning("webhook queue full — dropping oldest event")
+
+    def _worker(self):
+        import urllib.request
+        while True:
+            payload = self._q.get()
+            try:
+                req = urllib.request.Request(
+                    self.url, data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(req, timeout=self.timeout).read()
+            except Exception as e:
+                logger.warning("webhook delivery failed: %s", e)
+
+
+class _LatestFrameReader:
+    """Capture thread that always holds only the newest frame.
+
+    On live sources, if processing runs slower than the stream, OpenCV
+    buffers frames and the monitor falls further and further behind live.
+    This thread drains the source continuously so the main loop always
+    processes the most recent frame. Only used for live sources — draining
+    a FILE this way would skip most of it nondeterministically.
+    """
+
+    def __init__(self, cap):
+        self._cap = cap
+        self._lock = threading.Lock()
+        self._frame = None
+        self._alive = True
+        self._t = threading.Thread(target=self._loop, daemon=True)
+        self._t.start()
+
+    def _loop(self):
+        while self._alive:
+            ret, frame = self._cap.read()
+            if not ret:
+                self._alive = False
+                return
+            with self._lock:
+                self._frame = frame
+
+    def read(self):
+        """(source_still_open, latest_frame_or_None). The frame is consumed:
+        the same frame is never returned twice."""
+        with self._lock:
+            frame, self._frame = self._frame, None
+        return (self._alive or frame is not None), frame
+
+    def stop(self):
+        self._alive = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,15 +170,45 @@ class IOUTracker:
     No deep features needed — fast and sufficient for stationary cameras.
     """
 
-    def __init__(self, iou_threshold: float = 0.3, max_missed: int = 15):
+    def __init__(self, iou_threshold: float = 0.3, max_missed: int = 15,
+                 reid_retention_seconds: float = 120.0):
         """
         iou_threshold: minimum IOU to associate a detection with a track.
         max_missed: drop a track after this many consecutive frames without a match.
+        reid_retention_seconds: keep dropped tracks that carry a face embedding
+            around for this long, so a person who reappears can be re-matched
+            by appearance instead of getting a fresh track (see reid_match()).
         """
         self.iou_threshold = iou_threshold
         self.max_missed = max_missed
+        self.reid_retention = reid_retention_seconds
         self.tracks: List[Track] = []
+        self.lost: List[Track] = []       # dropped-but-remembered (have embeddings)
         self._next_id = 0
+
+    def _retire(self, dead: List[Track], timestamp: float):
+        """Move dead tracks with embeddings into the re-ID memory."""
+        self.lost.extend(t for t in dead if t.embedding is not None)
+        self.lost = [t for t in self.lost
+                     if timestamp - t.last_seen <= self.reid_retention][-64:]
+
+    def reid_match(self, embedding: np.ndarray, threshold: float = 0.65):
+        """Best recently-lost track whose face embedding matches, or None.
+
+        The face embedding IS an appearance feature — this is what DeepSORT
+        adds a whole second network for, and we get it free from the
+        identification step. Matching removes the track from re-ID memory.
+        """
+        if not self.lost:
+            return None
+        best_i, best_sim = -1, threshold
+        for i, t in enumerate(self.lost):
+            sim = float(np.dot(t.embedding, embedding))
+            if sim >= best_sim:
+                best_i, best_sim = i, sim
+        if best_i < 0:
+            return None
+        return self.lost.pop(best_i)
 
     def update(self, detections: List[tuple], timestamp: float) -> List[Track]:
         """Update tracks with new frame detections.
@@ -107,7 +224,9 @@ class IOUTracker:
             # Age out all tracks
             for t in self.tracks:
                 t.frames_missed += 1
+            dead = [t for t in self.tracks if t.frames_missed > self.max_missed]
             self.tracks = [t for t in self.tracks if t.frames_missed <= self.max_missed]
+            self._retire(dead, timestamp)
             return self.tracks
 
         # Match detections to existing tracks by IOU
@@ -151,8 +270,10 @@ class IOUTracker:
                 ))
                 self._next_id += 1
 
-        # Remove dead tracks
+        # Remove dead tracks (embedded ones go to re-ID memory)
+        dead = [t for t in self.tracks if t.frames_missed > self.max_missed]
         self.tracks = [t for t in self.tracks if t.frames_missed <= self.max_missed]
+        self._retire(dead, timestamp)
 
         return self.tracks
 
@@ -296,7 +417,9 @@ class StreamMonitor:
                  iou_threshold: float = 0.3,
                  max_missed_frames: int = 30,
                  visit_gap_seconds: float = 300.0,
-                 anomaly_threshold: int = 3):
+                 anomaly_threshold: int = 3,
+                 reid_threshold: float = 0.65,
+                 persist_events: bool = True):
         """
         engine: a FaceFlash instance with a loaded gallery.
         sample_fps: how many frames/sec to process (lower = less CPU).
@@ -307,6 +430,10 @@ class StreamMonitor:
         max_missed_frames: frames before a lost track is dropped.
         visit_gap_seconds: gap to count as a new visit.
         anomaly_threshold: unknown-face sighting count that triggers alert.
+        reid_threshold: cosine similarity to re-match a reappearing face to a
+            recently-lost track (appearance re-ID; uses the face embedding).
+        persist_events: write events to a stream_events table in the gallery's
+            SQLite file (no-op for the legacy .npy backend).
         """
         self.engine = engine
         self.sample_fps = sample_fps
@@ -314,6 +441,7 @@ class StreamMonitor:
         self.threshold = threshold
         self.max_far = max_far
         self.iou_threshold = iou_threshold
+        self.reid_threshold = reid_threshold
 
         self.tracker = IOUTracker(iou_threshold=iou_threshold,
                                   max_missed=max_missed_frames)
@@ -324,17 +452,65 @@ class StreamMonitor:
         self._running = False
         self._frame_count = 0
         self._alerted_tracks = set()   # anomaly alerts already emitted
+        self._prev_identities = set()
 
-    def on_event(self, callback: Callable[[StreamEvent], None]):
-        """Register an event callback. Called on person_appeared/left/anomaly."""
+        # Persist events into the SAME faces.db the gallery lives in, so
+        # analytics history survives restarts and is queryable with SQL.
+        self._events_db = None
+        if persist_events:
+            db = getattr(getattr(engine, "index", None), "_db", None)
+            if db is not None:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS stream_events ("
+                    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    " ts REAL NOT NULL,"
+                    " event_type TEXT NOT NULL,"
+                    " data TEXT NOT NULL DEFAULT '{}')")
+                db.commit()
+                self._events_db = db
+
+    def on_event(self, callback):
+        """Register an event callback, or a webhook URL string.
+
+        A URL gets events POSTed as JSON from a background worker
+        ({"event_type", "timestamp", "data"}) — delivery never blocks the
+        video loop, failures are logged.
+        """
+        if isinstance(callback, str):
+            callback = _WebhookSender(callback)
         self._callbacks.append(callback)
 
     def _emit(self, event: StreamEvent):
+        if self._events_db is not None:
+            try:
+                self._events_db.execute(
+                    "INSERT INTO stream_events(ts, event_type, data) VALUES (?, ?, ?)",
+                    (event.timestamp, event.event_type, json.dumps(event.data)))
+                self._events_db.commit()
+            except Exception as e:
+                logger.warning("event persistence failed: %s", e)
         for cb in self._callbacks:
             try:
                 cb(event)
             except Exception as e:
                 logger.warning("Event callback error: %s", e)
+
+    def events(self, event_type: Optional[str] = None,
+               since: Optional[float] = None, limit: int = 1000) -> List[dict]:
+        """Query persisted events (newest first) from the gallery's .db."""
+        if self._events_db is None:
+            return []
+        q = "SELECT ts, event_type, data FROM stream_events"
+        cond, args = [], []
+        if event_type is not None:
+            cond.append("event_type = ?"); args.append(event_type)
+        if since is not None:
+            cond.append("ts >= ?"); args.append(since)
+        if cond:
+            q += " WHERE " + " AND ".join(cond)
+        q += " ORDER BY ts DESC LIMIT ?"; args.append(limit)
+        return [{"timestamp": r[0], "event_type": r[1], "data": json.loads(r[2])}
+                for r in self._events_db.execute(q, args).fetchall()]
 
     def stop(self):
         """Stop the stream processing loop."""
@@ -358,103 +534,155 @@ class StreamMonitor:
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {source}")
 
-        stream_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        frame_interval = max(1, int(stream_fps / self.sample_fps))
+        is_live = isinstance(source, int) or str(source).lower().startswith(
+            ("rtsp://", "rtsps://", "http://", "https://", "udp://", "tcp://"))
 
         self._running = True
         self._frame_count = 0
-        frame_idx = 0
-        prev_identities = set()
+        self._prev_identities = set()
 
-        logger.info("Stream started: source=%s, sample_fps=%.1f, interval=%d",
-                    source, self.sample_fps, frame_interval)
-
+        logger.info("Stream started: source=%s, live=%s, sample_fps=%.1f",
+                    source, is_live, self.sample_fps)
         try:
-            while self._running:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                frame_idx += 1
-
-                # Show every frame (smooth video) but only process some
-                if frame_idx % frame_interval != 0:
-                    if show:
-                        # Draw last known tracks on non-processed frames
-                        self._draw_frame(frame, [t for t in self.tracker.tracks
-                                                 if t.frames_missed == 0])
-                        cv2.imshow("FaceFlash Stream", frame)
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            break
-                    continue
-
-                self._frame_count += 1
-                if max_frames and self._frame_count > max_frames:
-                    break
-
-                timestamp = time.time()
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                # ONE detector pass: boxes for the tracker + aligned
-                # crops for identification (no re-detection per track)
-                boxes, crop_by_box = self._detect(frame_rgb)
-
-                # Update tracker (fast — just IOU matching)
-                tracks = self.tracker.update(boxes, timestamp)
-                self.analytics.update(tracks, timestamp)
-
-                # Only identify tracks that need it (expensive — do sparingly)
-                active_tracks = [t for t in tracks if t.frames_missed == 0]
-                for track in active_tracks:
-                    should_identify = (
-                        track.identity is None and track.frames_seen >= 3
-                    ) or (
-                        track.identity is not None and
-                        track.frames_seen % self.identify_interval == 0
-                    )
-                    if should_identify:
-                        self._identify_track(track, frame_rgb, timestamp,
-                                             aligned=crop_by_box.get(tuple(track.box)))
-
-                # Events
-                current_identities = {t.identity for t in active_tracks if t.identity}
-                appeared = current_identities - prev_identities
-                left = prev_identities - current_identities
-
-                for name in appeared:
-                    self.analytics.person_appeared(name, timestamp)
-                    self._emit(StreamEvent("person_appeared", timestamp,
-                                           {"name": name}))
-                for name in left:
-                    dwell = self.analytics.get_dwell_time(name)
-                    self._emit(StreamEvent("person_left", timestamp,
-                                           {"name": name, "dwell_seconds": round(dwell, 1)}))
-                for name in current_identities:
-                    self.analytics.person_update(name, timestamp)
-
-                # Anomaly check
-                for track in active_tracks:
-                    if track.identity is None and track.frames_seen > 10:
-                        self.analytics.unknown_sightings[track.track_id] += 1
-                for a in self.analytics.get_anomalies():
-                    if a["track_id"] not in self._alerted_tracks:
-                        self._alerted_tracks.add(a["track_id"])
-                        self._emit(StreamEvent("anomaly", timestamp, a))
-
-                prev_identities = current_identities
-
-                # Display
-                if show:
-                    self._draw_frame(frame, active_tracks)
-                    cv2.imshow("FaceFlash Stream", frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-
+            if is_live:
+                self._run_live(cap, cv2, show, max_frames)
+            else:
+                self._run_file(cap, cv2, show, max_frames)
         finally:
             cap.release()
             if show:
                 cv2.destroyAllWindows()
             self._running = False
             logger.info("Stream stopped. Frames processed: %d", self._frame_count)
+
+    def _run_live(self, cap, cv2, show, max_frames):
+        """Live sources: a capture thread drains the stream so processing
+        never falls behind real time; frames are processed at sample_fps."""
+        reader = _LatestFrameReader(cap)
+        min_gap = 1.0 / self.sample_fps
+        last_proc = 0.0
+        try:
+            while self._running:
+                alive, frame = reader.read()
+                if not alive:
+                    break
+                if frame is None:
+                    time.sleep(0.005)
+                    continue
+
+                now = time.time()
+                if now - last_proc < min_gap:
+                    # Not due for processing — keep the display smooth
+                    if show:
+                        self._draw_frame(frame, [t for t in self.tracker.tracks
+                                                 if t.frames_missed == 0])
+                        cv2.imshow("FaceFlash Stream", frame)
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            break
+                    else:
+                        time.sleep(0.005)
+                    continue
+                last_proc = now
+
+                self._frame_count += 1
+                if max_frames and self._frame_count > max_frames:
+                    break
+                active = self._process_frame(frame, cv2)
+                if show:
+                    self._draw_frame(frame, active)
+                    cv2.imshow("FaceFlash Stream", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+        finally:
+            reader.stop()
+
+    def _run_file(self, cap, cv2, show, max_frames):
+        """File sources: synchronous sequential reads (draining a file the
+        live way would skip most of it), sampled by frame index."""
+        stream_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_interval = max(1, int(stream_fps / self.sample_fps))
+        frame_idx = 0
+
+        while self._running:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_idx += 1
+
+            # Show every frame (smooth video) but only process some
+            if frame_idx % frame_interval != 0:
+                if show:
+                    self._draw_frame(frame, [t for t in self.tracker.tracks
+                                             if t.frames_missed == 0])
+                    cv2.imshow("FaceFlash Stream", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                continue
+
+            self._frame_count += 1
+            if max_frames and self._frame_count > max_frames:
+                break
+            active = self._process_frame(frame, cv2)
+            if show:
+                self._draw_frame(frame, active)
+                cv2.imshow("FaceFlash Stream", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
+    def _process_frame(self, frame, cv2) -> List[Track]:
+        """Detect → track → identify → analytics → events, for one frame.
+        Returns the active tracks (for drawing)."""
+        timestamp = time.time()
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # ONE detector pass: boxes for the tracker + aligned
+        # crops for identification (no re-detection per track)
+        boxes, crop_by_box = self._detect(frame_rgb)
+
+        # Update tracker (fast — just IOU matching)
+        tracks = self.tracker.update(boxes, timestamp)
+        self.analytics.update(tracks, timestamp)
+
+        # Only identify tracks that need it (expensive — do sparingly)
+        active_tracks = [t for t in tracks if t.frames_missed == 0]
+        for track in active_tracks:
+            should_identify = (
+                track.identity is None and track.frames_seen >= 3
+            ) or (
+                track.identity is not None and
+                track.frames_seen % self.identify_interval == 0
+            )
+            if should_identify:
+                self._identify_track(track, frame_rgb, timestamp,
+                                     aligned=crop_by_box.get(tuple(track.box)))
+
+        # Events
+        current_identities = {t.identity for t in active_tracks if t.identity}
+        appeared = current_identities - self._prev_identities
+        left = self._prev_identities - current_identities
+
+        for name in appeared:
+            self.analytics.person_appeared(name, timestamp)
+            self._emit(StreamEvent("person_appeared", timestamp,
+                                   {"name": name}))
+        for name in left:
+            dwell = self.analytics.get_dwell_time(name)
+            self._emit(StreamEvent("person_left", timestamp,
+                                   {"name": name, "dwell_seconds": round(dwell, 1)}))
+        for name in current_identities:
+            self.analytics.person_update(name, timestamp)
+
+        # Anomaly check
+        for track in active_tracks:
+            if track.identity is None and track.frames_seen > 10:
+                self.analytics.unknown_sightings[track.track_id] += 1
+        for a in self.analytics.get_anomalies():
+            if a["track_id"] not in self._alerted_tracks:
+                self._alerted_tracks.add(a["track_id"])
+                self._emit(StreamEvent("anomaly", timestamp, a))
+
+        self._prev_identities = current_identities
+        return active_tracks
 
     def _detect(self, frame_rgb: np.ndarray):
         """One detector pass → (boxes, {box: aligned_crop}).
@@ -523,6 +751,25 @@ class StreamMonitor:
                     return
                 face = detect_and_align(crop)
             embedding = self.engine.embedder.embed(face)
+            track.embedding = embedding
+
+            # Appearance re-ID: did this face belong to a recently-lost track?
+            # (Occlusions / brief exits otherwise reset identity, dwell
+            # continuity and the unknown-visitor counter.)
+            if track.identity is None:
+                old_track = self.tracker.reid_match(embedding, self.reid_threshold)
+                if old_track is not None:
+                    track.identity = old_track.identity
+                    track.confidence = old_track.confidence
+                    track.first_seen = old_track.first_seen
+                    # carry the anomaly bookkeeping across the track change
+                    prev = self.analytics.unknown_sightings.pop(old_track.track_id, 0)
+                    if prev:
+                        self.analytics.unknown_sightings[track.track_id] += prev
+                    if old_track.track_id in self._alerted_tracks:
+                        self._alerted_tracks.add(track.track_id)
+                    if track.identity is not None:
+                        return          # identity restored, no gallery search needed
 
             # Search
             threshold = self.threshold
@@ -536,7 +783,6 @@ class StreamMonitor:
             if results and results[0][1] >= threshold:
                 track.identity = results[0][0]
                 track.confidence = results[0][1]
-                track.embedding = embedding
 
         except Exception as e:
             logger.debug("Identify track %d failed: %s", track.track_id, e)
