@@ -83,6 +83,31 @@ class _WebhookSender:
                 logger.warning("webhook delivery failed: %s", e)
 
 
+def _point_in_polygon(x: float, y: float, poly) -> bool:
+    """Ray-casting point-in-polygon. poly = [(x, y), ...]."""
+    inside = False
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if (yi > y) != (yj > y) and                 x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _sharpness(crop: "np.ndarray") -> float:
+    """Blur score: variance of the Laplacian on the aligned crop.
+    Sharp faces score in the hundreds; motion blur drops below ~30."""
+    try:
+        import cv2
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    except Exception:
+        return 1e9   # can't measure -> don't block identification
+
+
 class _VisitorRegistry:
     """Counts UNIQUE unregistered people by clustering their embeddings.
 
@@ -199,6 +224,8 @@ class Track:
     identity: Optional[str] = None
     visitor_id: Optional[str] = None   # pseudonymous ID for unregistered faces
     confidence: float = 0.0
+    quality: float = 0.0               # sharpness of the best crop seen
+    zones: frozenset = frozenset()     # zone names the face is currently in
     first_seen: float = 0.0
     last_seen: float = 0.0
     frames_seen: int = 0
@@ -494,7 +521,11 @@ class StreamMonitor:
                  display_grace: int = 4,
                  min_track_frames: int = 2,
                  min_det_score: float = 0.55,
-                 idle_fps: float = 1.0):
+                 idle_fps: float = 1.0,
+                 min_sharpness: float = 20.0,
+                 swap_threshold: float = 0.35,
+                 camera_name: Optional[str] = None,
+                 snapshot_dir: Optional[str] = None):
         """
         engine: a FaceFlash instance with a loaded gallery.
         sample_fps: how many frames/sec to process (lower = less CPU).
@@ -532,6 +563,19 @@ class StreamMonitor:
             An attendance camera is idle most of the day — no point burning
             sample_fps worth of detection on empty frames. Ramps back to
             sample_fps the moment a face appears.
+        min_sharpness: skip identification on crops blurrier than this
+            (Laplacian variance; sharp faces score 100+, motion blur <30).
+            The track retries on the next, hopefully sharper, frame. The
+            stored track embedding always comes from the sharpest crop seen.
+        swap_threshold: if a track's new embedding disagrees with its stored
+            one below this cosine, a DIFFERENT person now owns the box (two
+            people crossed paths) — identity resets and re-resolves instead
+            of sticking with the swapped name.
+        camera_name: tag for every event this monitor emits ("door", "lobby").
+        snapshot_dir: OPT-IN event replay — save a face crop JPEG alongside
+            person_appeared / visitor_new events (path lands in the event
+            data, queryable via events()). Off by default: this stores images
+            of everyone, including strangers — check your consent obligations.
         """
         self.engine = engine
         self.sample_fps = sample_fps
@@ -558,6 +602,12 @@ class StreamMonitor:
         self.min_det_score = min_det_score
         self.idle_fps = idle_fps
         self.visitors = _VisitorRegistry()
+        self.min_sharpness = min_sharpness
+        self.swap_threshold = swap_threshold
+        self.camera_name = camera_name
+        self.snapshot_dir = snapshot_dir
+        self.zones: Dict[str, list] = {}
+        self._engine_lock = threading.Lock()   # shared when multi-camera
         self._detector = None          # lazy; False = tried and failed
 
         # Persist events into the SAME faces.db the gallery lives in, so
@@ -586,7 +636,17 @@ class StreamMonitor:
             callback = _WebhookSender(callback)
         self._callbacks.append(callback)
 
+    def add_zone(self, name: str, polygon):
+        """Define a named zone as a polygon of (x, y) pixel coords.
+        Tracks entering/leaving fire zone_entered / zone_exited events, and
+        report() includes live per-zone counts."""
+        if len(polygon) < 3:
+            raise ValueError("A zone needs at least 3 points")
+        self.zones[name] = [(float(x), float(y)) for x, y in polygon]
+
     def _emit(self, event: StreamEvent):
+        if self.camera_name is not None:
+            event.data.setdefault("camera", self.camera_name)
         if self._events_db is not None:
             try:
                 self._events_db.execute(
@@ -781,6 +841,26 @@ class StreamMonitor:
         for name in current_identities:
             self.analytics.person_update(name, timestamp)
 
+        # Zones: membership by box center; fire enter/exit on change
+        if self.zones:
+            for track in active_tracks:
+                cx = (track.box[0] + track.box[2]) / 2.0
+                cy = (track.box[1] + track.box[3]) / 2.0
+                now_in = frozenset(z for z, poly in self.zones.items()
+                                   if _point_in_polygon(cx, cy, poly))
+                who = track.identity or track.visitor_id or f"track_{track.track_id}"
+                for z in now_in - track.zones:
+                    self._emit(StreamEvent("zone_entered", timestamp,
+                                           {"zone": z, "name": who}))
+                for z in track.zones - now_in:
+                    self._emit(StreamEvent("zone_exited", timestamp,
+                                           {"zone": z, "name": who}))
+                track.zones = now_in
+
+        # Opt-in event replay: snapshot the face behind person_appeared
+        if self.snapshot_dir and appeared:
+            self._save_snapshots(appeared, active_tracks, crop_by_box, timestamp)
+
         # Anomaly check (counts only frames the face was actually detected)
         for track in detected_now:
             if track.identity is None and track.frames_seen > 10:
@@ -798,7 +878,32 @@ class StreamMonitor:
         r = self.analytics.report()
         r["unique_unregistered_visitors"] = self.visitors.count
         r["attendance"] = self.analytics.attendance()
+        if self.zones:
+            counts = {z: 0 for z in self.zones}
+            for t in self._visible_tracks():
+                for z in t.zones:
+                    counts[z] += 1
+            r["zones"] = counts
         return r
+
+    def _save_snapshots(self, appeared, active_tracks, crop_by_box, timestamp):
+        """Write a JPEG of each newly-appeared person's crop (opt-in replay)."""
+        try:
+            from PIL import Image
+            from pathlib import Path as _P
+            out = _P(self.snapshot_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            for name in appeared:
+                track = next((t for t in active_tracks if t.identity == name), None)
+                crop = crop_by_box.get(tuple(track.box)) if track else None
+                if crop is None:
+                    continue
+                fname = f"{int(timestamp)}_{name}.jpg"
+                Image.fromarray(crop).save(out / fname, quality=85)
+                self._emit(StreamEvent("snapshot", timestamp,
+                                       {"name": name, "path": str(out / fname)}))
+        except Exception as e:
+            logger.warning("snapshot save failed: %s", e)
 
     def _visible_tracks(self) -> List[Track]:
         """Tracks to draw / count as present: seen enough times to be real
@@ -896,11 +1001,17 @@ class StreamMonitor:
             pairs = []
             for track in due:
                 face = self._face_for_track(track, frame_rgb, crop_by_box)
-                if face is not None:
-                    pairs.append((track, face))
+                if face is None:
+                    continue
+                q = _sharpness(face)
+                if q < self.min_sharpness:
+                    continue          # blurry crop — retry on a sharper frame
+                pairs.append((track, face, q))
             if not pairs:
                 return
-            embeddings = self.engine.embedder.embed_batch([f for _, f in pairs])
+            with self._engine_lock:
+                embeddings = self.engine.embedder.embed_batch(
+                    [f for _, f, _ in pairs])
         except Exception as e:
             logger.debug("Batch identify failed: %s", e)
             return
@@ -909,8 +1020,20 @@ class StreamMonitor:
         if self.max_far is not None:
             threshold = self.engine._threshold_for_far(self.max_far)
 
-        for (track, _), embedding in zip(pairs, embeddings):
-            track.embedding = embedding
+        for (track, _, q), embedding in zip(pairs, embeddings):
+            # Swap guard: the tracker matches by position, so when two people
+            # cross paths a track can end up on the WRONG face. If the new
+            # embedding clearly isn't the same person as the stored one,
+            # reset identity and let it re-resolve below.
+            if track.embedding is not None and                     float(np.dot(track.embedding, embedding)) < self.swap_threshold:
+                track.identity = None
+                track.visitor_id = None
+                track.confidence = 0.0
+                track.quality = 0.0
+            # keep the embedding from the sharpest crop seen (re-ID quality)
+            if q >= track.quality:
+                track.embedding = embedding
+                track.quality = q
 
             # Appearance re-ID: did this face belong to a recently-lost track?
             # (Occlusions / brief exits otherwise reset identity, dwell
@@ -931,9 +1054,10 @@ class StreamMonitor:
                     if track.identity is not None:
                         continue        # identity restored, no gallery search needed
 
-            results = self.engine.index.search(
-                embedding, k=1,
-                n_candidates=self.engine.n_candidates)
+            with self._engine_lock:
+                results = self.engine.index.search(
+                    embedding, k=1,
+                    n_candidates=self.engine.n_candidates)
             if results and results[0][1] >= threshold:
                 track.identity = results[0][0]
                 track.confidence = results[0][1]
@@ -957,3 +1081,73 @@ class StreamMonitor:
             label = f"{name} ({track.confidence:.2f})" if track.identity else name
             cv2.putText(frame, label, (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-camera — N sources, one gallery, one process
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MultiCameraMonitor:
+    """Run several cameras against ONE gallery in one process.
+
+    Each camera gets its own StreamMonitor (own tracker, own zones); they
+    share the engine (serialized behind one lock — identification is the
+    only contended resource) and one visitor registry, so an unregistered
+    person seen at the door and later in the lobby counts as ONE visitor
+    (cross-camera re-ID by embedding). Every event carries its camera name.
+
+    This is deliberately NOT a distributed system: one process, one box.
+    For camera fleets, failover, and hardware acceleration, run a real NVR
+    (e.g. Frigate) and use FaceFlash as the recognition backend.
+
+    Usage:
+        mc = MultiCameraMonitor(ff, {"door": 0, "lobby": "rtsp://..."})
+        mc.on_event(print)
+        mc.monitors["door"].add_zone("entrance", [(0, 0), (400, 0), (400, 700), (0, 700)])
+        mc.run()          # blocks; Ctrl-C or mc.stop() to end
+    """
+
+    def __init__(self, engine, cameras: Dict[str, Union[int, str]], **monitor_kwargs):
+        self.engine = engine
+        shared_lock = threading.Lock()
+        shared_visitors = _VisitorRegistry()
+        self.monitors: Dict[str, StreamMonitor] = {}
+        for name, source in cameras.items():
+            m = StreamMonitor(engine, camera_name=name, **monitor_kwargs)
+            m._engine_lock = shared_lock       # one identification at a time
+            m.visitors = shared_visitors       # cross-camera visitor identity
+            self.monitors[name] = m
+        self._sources = dict(cameras)
+        self._threads: List[threading.Thread] = []
+
+    def on_event(self, callback):
+        """Register a callback (or webhook URL) on every camera."""
+        for m in self.monitors.values():
+            m.on_event(callback)
+
+    def run(self, block: bool = True):
+        """Start all cameras (one thread each)."""
+        for name, m in self.monitors.items():
+            t = threading.Thread(target=m.run, args=(self._sources[name],),
+                                 daemon=True, name=f"faceflash-cam-{name}")
+            t.start()
+            self._threads.append(t)
+        if block:
+            try:
+                while any(t.is_alive() for t in self._threads):
+                    time.sleep(0.5)
+            except KeyboardInterrupt:
+                self.stop()
+
+    def stop(self):
+        for m in self.monitors.values():
+            m.stop()
+        for t in self._threads:
+            t.join(timeout=5.0)
+
+    def report(self) -> Dict[str, Any]:
+        """Combined snapshot: per-camera analytics + global visitor count."""
+        per_cam = {name: m.report() for name, m in self.monitors.items()}
+        visitors = next(iter(self.monitors.values())).visitors.count \
+            if self.monitors else 0
+        return {"cameras": per_cam, "unique_unregistered_visitors": visitors}

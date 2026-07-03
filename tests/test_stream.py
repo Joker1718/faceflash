@@ -291,3 +291,112 @@ def test_ghost_boxes_hidden_until_confirmed():
     assert len(mon._visible_tracks()) == 0      # tentative — not drawn yet
     mon.tracker.update([(2, 0, 52, 50)], timestamp=2.0)
     assert len(mon._visible_tracks()) == 1      # confirmed on 2nd sighting
+
+
+# ── top-5 market features: zones, swap guard, quality, snapshots, multicam ──
+
+def test_zone_enter_exit_events_and_counts():
+    from faceflash.stream import StreamMonitor, _point_in_polygon
+    assert _point_in_polygon(50, 50, [(0, 0), (100, 0), (100, 100), (0, 100)])
+    assert not _point_in_polygon(150, 50, [(0, 0), (100, 0), (100, 100), (0, 100)])
+
+    ff_stub = type("E", (), {"n_candidates": 100})()
+    mon = StreamMonitor(ff_stub, min_track_frames=1)
+    mon.add_zone("entrance", [(0, 0), (100, 0), (100, 100), (0, 100)])
+    events = []
+    mon.on_event(events.append)
+
+    # simulate the zone block from _process_frame directly
+    from faceflash.stream import StreamEvent, _point_in_polygon as pip
+    t = mon.tracker.update([(40, 40, 60, 60)], timestamp=1.0)[0]  # center (50,50)
+    for track in [t]:
+        cx = (track.box[0] + track.box[2]) / 2.0
+        cy = (track.box[1] + track.box[3]) / 2.0
+        now_in = frozenset(z for z, poly in mon.zones.items() if pip(cx, cy, poly))
+        for z in now_in - track.zones:
+            mon._emit(StreamEvent("zone_entered", 1.0, {"zone": z, "name": "x"}))
+        track.zones = now_in
+    assert events and events[0].event_type == "zone_entered"
+    assert mon.report()["zones"]["entrance"] == 1
+
+
+def test_swap_guard_resets_identity_on_face_change():
+    """When a track's face suddenly isn't the same person, identity resets."""
+    from faceflash.stream import StreamMonitor
+
+    rng = np.random.default_rng(13)
+    alice = rng.standard_normal(512).astype(np.float32); alice /= np.linalg.norm(alice)
+    bob = rng.standard_normal(512).astype(np.float32); bob /= np.linalg.norm(bob)
+
+    class StubIndex:
+        def search(self, emb, k=1, n_candidates=100):
+            return []          # nobody in the gallery
+    class StubEmbedder:
+        def __init__(self): self.next = None
+        def embed_batch(self, faces): return np.stack([self.next] * len(faces))
+    class StubEngine:
+        n_candidates = 100
+        index = StubIndex()
+        embedder = StubEmbedder()
+
+    eng = StubEngine()
+    mon = StreamMonitor(eng, min_sharpness=0)
+    track = mon.tracker.update([(0, 0, 100, 100)], timestamp=1.0)[0]
+    track.frames_seen = 3
+
+    frame = np.zeros((200, 200, 3), dtype=np.uint8)
+    crop = np.zeros((112, 112, 3), dtype=np.uint8)
+
+    eng.embedder.next = alice
+    mon._identify_tracks([track], frame, {tuple(track.box): crop})
+    track.identity = "alice"          # as if the gallery had matched
+
+    eng.embedder.next = bob           # different person now owns the box
+    mon._identify_tracks([track], frame, {tuple(track.box): crop})
+    assert track.identity is None     # swap guard reset it
+
+
+def test_sharpness_gate_skips_blurry_crops():
+    from faceflash.stream import _sharpness
+    rng = np.random.default_rng(3)
+    noisy = rng.integers(0, 255, (112, 112, 3), dtype=np.uint8)   # high variance
+    flat = np.full((112, 112, 3), 128, dtype=np.uint8)            # zero variance
+    assert _sharpness(noisy) > 100
+    assert _sharpness(flat) < 1
+
+
+def test_snapshot_saved_on_appearance(tmp_path):
+    from faceflash.stream import StreamMonitor
+    ff_stub = type("E", (), {"n_candidates": 100})()
+    mon = StreamMonitor(ff_stub, snapshot_dir=str(tmp_path / "snaps"))
+    events = []
+    mon.on_event(events.append)
+
+    t = mon.tracker.update([(0, 0, 112, 112)], timestamp=1.0)[0]
+    t.identity = "alice"
+    crop = np.zeros((112, 112, 3), dtype=np.uint8)
+    mon._save_snapshots({"alice"}, [t], {tuple(t.box): crop}, 1234567890.0)
+
+    snaps = list((tmp_path / "snaps").glob("*.jpg"))
+    assert len(snaps) == 1 and "alice" in snaps[0].name
+    assert any(e.event_type == "snapshot" for e in events)
+
+
+def test_multicamera_shares_visitors_and_tags_events():
+    from faceflash.stream import MultiCameraMonitor, StreamEvent
+    ff_stub = type("E", (), {"n_candidates": 100, "index": None})()
+    mc = MultiCameraMonitor(ff_stub, {"door": 0, "lobby": 1})
+
+    # shared visitor registry: same object across cameras
+    door, lobby = mc.monitors["door"], mc.monitors["lobby"]
+    assert door.visitors is lobby.visitors
+    assert door._engine_lock is lobby._engine_lock
+
+    # events carry the camera name
+    got = []
+    door.on_event(got.append)
+    door._emit(StreamEvent("person_appeared", 1.0, {"name": "x"}))
+    assert got[0].data["camera"] == "door"
+
+    r = mc.report()
+    assert set(r["cameras"]) == {"door", "lobby"}
