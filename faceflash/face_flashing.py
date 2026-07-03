@@ -34,8 +34,11 @@ def _generate_flash_patterns(n: int, seed: Optional[int] = None) -> List[np.ndar
 def _extract_face_region(frame: np.ndarray) -> Optional[np.ndarray]:
     """Detect and crop the face from a frame."""
     try:
-        from faceflash.detect import detect_and_align
-        return detect_and_align(frame)
+        from faceflash.detect import detect_and_align_info
+        face, method = detect_and_align_info(frame)
+        # A center crop is NOT a detected face — reflections off a wall
+        # must not count toward the liveness decision.
+        return None if method == "center_crop" else face
     except Exception:
         return None
 

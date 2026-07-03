@@ -38,6 +38,17 @@ logger = logging.getLogger(__name__)
 # IOU Tracker — lightweight multi-face tracking without deep features
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _nms(boxes, iou_threshold: float = 0.4):
+    """Greedy non-maximum suppression on (x1,y1,x2,y2) boxes, largest first."""
+    boxes = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]),
+                   reverse=True)
+    kept = []
+    for b in boxes:
+        if all(_iou(b, k) < iou_threshold for k in kept):
+            kept.append(b)
+    return kept
+
+
 def _iou(box_a, box_b):
     """Intersection over union of two (x1,y1,x2,y2) boxes."""
     x1 = max(box_a[0], box_b[0])
@@ -312,6 +323,7 @@ class StreamMonitor:
         self._callbacks: List[Callable[[StreamEvent], None]] = []
         self._running = False
         self._frame_count = 0
+        self._alerted_tracks = set()   # anomaly alerts already emitted
 
     def on_event(self, callback: Callable[[StreamEvent], None]):
         """Register an event callback. Called on person_appeared/left/anomaly."""
@@ -342,8 +354,6 @@ class StreamMonitor:
         except ImportError:
             raise ImportError("opencv-python is required: pip install opencv-python")
 
-        from faceflash.detect import detect_faces
-
         cap = cv2.VideoCapture(source)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {source}")
@@ -366,8 +376,15 @@ class StreamMonitor:
                     break
                 frame_idx += 1
 
-                # Skip frames to match sample_fps
+                # Show every frame (smooth video) but only process some
                 if frame_idx % frame_interval != 0:
+                    if show:
+                        # Draw last known tracks on non-processed frames
+                        self._draw_frame(frame, [t for t in self.tracker.tracks
+                                                 if t.frames_missed == 0])
+                        cv2.imshow("FaceFlash Stream", frame)
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            break
                     continue
 
                 self._frame_count += 1
@@ -377,27 +394,29 @@ class StreamMonitor:
                 timestamp = time.time()
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                # Detect all faces → bounding boxes
-                faces = detect_faces(frame_rgb)
-                # Get boxes from detection (approximate from crops)
-                h, w = frame_rgb.shape[:2]
-                boxes = self._estimate_boxes(frame_rgb, len(faces))
+                # ONE detector pass: boxes for the tracker + aligned
+                # crops for identification (no re-detection per track)
+                boxes, crop_by_box = self._detect(frame_rgb)
 
-                # Update tracker
+                # Update tracker (fast — just IOU matching)
                 tracks = self.tracker.update(boxes, timestamp)
                 self.analytics.update(tracks, timestamp)
 
-                # Identify tracks that need it
-                for track in tracks:
+                # Only identify tracks that need it (expensive — do sparingly)
+                active_tracks = [t for t in tracks if t.frames_missed == 0]
+                for track in active_tracks:
                     should_identify = (
-                        track.identity is None or
+                        track.identity is None and track.frames_seen >= 3
+                    ) or (
+                        track.identity is not None and
                         track.frames_seen % self.identify_interval == 0
                     )
-                    if should_identify and track.frames_seen > 0:
-                        self._identify_track(track, frame_rgb, timestamp)
+                    if should_identify:
+                        self._identify_track(track, frame_rgb, timestamp,
+                                             aligned=crop_by_box.get(tuple(track.box)))
 
-                # Check for appeared / left events
-                current_identities = {t.identity for t in tracks if t.identity}
+                # Events
+                current_identities = {t.identity for t in active_tracks if t.identity}
                 appeared = current_identities - prev_identities
                 left = prev_identities - current_identities
 
@@ -405,30 +424,27 @@ class StreamMonitor:
                     self.analytics.person_appeared(name, timestamp)
                     self._emit(StreamEvent("person_appeared", timestamp,
                                            {"name": name}))
-
                 for name in left:
                     dwell = self.analytics.get_dwell_time(name)
                     self._emit(StreamEvent("person_left", timestamp,
                                            {"name": name, "dwell_seconds": round(dwell, 1)}))
-
-                # Update dwell for everyone still visible
                 for name in current_identities:
                     self.analytics.person_update(name, timestamp)
 
-                # Check anomalies
-                for track in tracks:
+                # Anomaly check
+                for track in active_tracks:
                     if track.identity is None and track.frames_seen > 10:
                         self.analytics.unknown_sightings[track.track_id] += 1
-
-                anomalies = self.analytics.get_anomalies()
-                for a in anomalies:
-                    self._emit(StreamEvent("anomaly", timestamp, a))
+                for a in self.analytics.get_anomalies():
+                    if a["track_id"] not in self._alerted_tracks:
+                        self._alerted_tracks.add(a["track_id"])
+                        self._emit(StreamEvent("anomaly", timestamp, a))
 
                 prev_identities = current_identities
 
-                # Optional display
+                # Display
                 if show:
-                    self._draw_frame(frame, tracks)
+                    self._draw_frame(frame, active_tracks)
                     cv2.imshow("FaceFlash Stream", frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
@@ -440,55 +456,72 @@ class StreamMonitor:
             self._running = False
             logger.info("Stream stopped. Frames processed: %d", self._frame_count)
 
-    def _estimate_boxes(self, frame_rgb: np.ndarray, n_faces: int) -> List[tuple]:
-        """Estimate bounding boxes from detection.
+    def _detect(self, frame_rgb: np.ndarray):
+        """One detector pass → (boxes, {box: aligned_crop}).
 
-        Since detect_faces returns crops, we re-run detection for boxes.
-        This is a simplified version — in production, modify detect_faces
-        to return both boxes and crops.
+        SCRFD gives boxes AND landmarks in a single inference, so the aligned
+        112x112 crops come for free — identification then never re-runs the
+        detector on track crops. Haar fallback (no landmarks) returns boxes
+        only; those tracks identify via the per-crop path.
         """
         try:
-            from faceflash.align import get_detector
-            det = get_detector()
-            if det is not None:
-                boxes, _ = det.detect(frame_rgb)
-                if len(boxes):
-                    return [(int(b[0]), int(b[1]), int(b[2]), int(b[3]))
-                            for b in boxes[:, :4]]
+            from faceflash.detect import detect_faces_boxes
+            dets = [d for d in detect_faces_boxes(frame_rgb)
+                    if d["method"] == "scrfd"]
+            if dets:
+                boxes = [tuple(d["box"]) for d in dets]
+                return boxes, {tuple(d["box"]): d["crop"] for d in dets}
         except Exception:
             pass
 
-        # Fallback: if we can't get boxes, use Haar
+        # Haar fallback with NMS (multi-face; detect_faces_boxes' fallback
+        # only reports the largest)
+        h, w = frame_rgb.shape[:2]
+        min_face = max(40, min(h, w) // 10)
+        max_face = min(h, w) * 2 // 3
         try:
             import cv2
             gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
             cascade = cv2.CascadeClassifier(
                 cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-            faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(30, 30))
-            return [(x, y, x + w, y + h) for (x, y, w, h) in faces]
+            faces = cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.15,
+                minNeighbors=6,
+                minSize=(min_face, min_face),
+                maxSize=(max_face, max_face),
+            )
+            if len(faces):
+                boxes = [(int(x), int(y), int(x + fw), int(y + fh))
+                         for (x, y, fw, fh) in faces]
+                return _nms(boxes, iou_threshold=0.4), {}
         except Exception:
             pass
 
-        return []
+        return [], {}
 
     def _identify_track(self, track: Track, frame_rgb: np.ndarray,
-                        timestamp: float):
-        """Try to identify a tracked face against the gallery."""
+                        timestamp: float, aligned: Optional[np.ndarray] = None):
+        """Try to identify a tracked face against the gallery.
+
+        `aligned` is the pre-aligned crop from this frame's detector pass
+        (SCRFD path) — used directly. Without it (Haar path), the track
+        region is cropped and re-detected.
+        """
         try:
-            from faceflash.detect import detect_and_align
+            if aligned is not None:
+                face = aligned
+            else:
+                from faceflash.detect import detect_and_align
 
-            # Crop the tracked region
-            x1, y1, x2, y2 = track.box
-            h, w = frame_rgb.shape[:2]
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
-            crop = frame_rgb[y1:y2, x1:x2]
-
-            if crop.size == 0:
-                return
-
-            # Detect + align within the crop
-            face = detect_and_align(crop)
+                x1, y1, x2, y2 = track.box
+                h, w = frame_rgb.shape[:2]
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                crop = frame_rgb[y1:y2, x1:x2]
+                if crop.size == 0:
+                    return
+                face = detect_and_align(crop)
             embedding = self.engine.embedder.embed(face)
 
             # Search

@@ -66,6 +66,7 @@ class FaceFlash:
         """
         self._embedder: Optional[FaceEmbedder] = None
         self._attributes: Optional[FaceAttributes] = None
+        self._liveness = None
         self.n_candidates = n_candidates
         if index_path and str(index_path).endswith(".db"):
             self.index = FaceIndex(n_bits=n_bits, db_path=str(index_path))
@@ -170,6 +171,22 @@ class FaceFlash:
         attrs = self.attributes.analyze(face)
         return attrs
 
+    def check_liveness(self, image_path: str) -> dict:
+        """Anti-spoofing check on the main face in an image.
+
+        Returns {"live": bool, "liveness_score": 0-1, "label":
+        "live"|"print_attack"|"replay_attack", "detection": how the face
+        was found}. Single-frame passive check (MiniFASNetV2) — a first-line
+        filter against printed photos and screen replays, not 3D masks.
+        """
+        img = load_image(image_path)
+        face, method = detect_and_align_info(img)
+        score, label = self.liveness.check(face)
+        return {"live": label == "live",
+                "liveness_score": round(float(score), 4),
+                "label": label,
+                "detection": method}
+
     def calibrate(self, n_pairs: int = 100_000, seed: int = 0) -> dict:
         """Calibrate what a cosine threshold means in false-accept rate on
         THIS gallery (impostor pairs sampled from the enrolled faces).
@@ -203,6 +220,7 @@ class FaceFlash:
     def search(self, image_path: str, k: int = 1, threshold: float = 0.4,
                n_candidates: Optional[int] = None,
                max_far: Optional[float] = None,
+               check_liveness: bool = False,
                with_attributes: bool = False,
                age_filter: Optional[str] = None,
                min_age: Optional[int] = None,
@@ -220,6 +238,14 @@ class FaceFlash:
 
         img = load_image(image_path)
         face = detect_and_align(img)
+
+        if check_liveness:
+            score, label = self.liveness.check(face)
+            if label != "live":
+                return {"matches": [], "filtered": f"liveness: {label}",
+                        "liveness_score": round(float(score), 4),
+                        "time_ms": round((time.perf_counter() - start) * 1000, 2)}
+
         embedding = self.embedder.embed(face)
 
         # Age/gender filtering on the query face

@@ -23,10 +23,10 @@ logger = logging.getLogger(__name__)
 
 MODEL_URL = (
     "https://huggingface.co/garciafido/minifasnet-v2-anti-spoofing-onnx/"
-    "resolve/main/minifasnet_v2_80x80.onnx"
+    "resolve/main/minifasnet_v2.onnx"
 )
 MODEL_DIR = Path.home() / ".faceflash" / "models"
-MODEL_PATH = MODEL_DIR / "minifasnet_v2_80x80.onnx"
+MODEL_PATH = MODEL_DIR / "minifasnet_v2.onnx"
 
 # Class labels from the model
 _LABELS = ["live", "print_attack", "replay_attack"]
