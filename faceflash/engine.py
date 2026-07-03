@@ -356,13 +356,23 @@ class FaceFlash:
         """Anti-spoofing check on the main face in an image.
 
         Returns {"live": bool, "liveness_score": 0-1, "label":
-        "live"|"print_attack"|"replay_attack", "detection": how the face
+        "live"|"spoof"|"no_face", "detection": how the face
         was found}. Single-frame passive check (MiniFASNetV2) — a first-line
         filter against printed photos and screen replays, not 3D masks.
         """
         img = load_image(image_path)
-        face, method = detect_and_align_info(img)
-        score, label = self.liveness.check(face)
+        dets = detect_faces_boxes(img)
+        scrfd = [d for d in dets if d["method"] == "scrfd"]
+        if scrfd:
+            d = max(scrfd, key=lambda d: (d["box"][2] - d["box"][0]) *
+                    (d["box"][3] - d["box"][1]))
+            score, label = self.liveness.check_frame(img, d["box"])
+            method = "scrfd"
+        else:
+            # no real detection (only a fallback crop) — can't do a valid
+            # context crop; report unknown rather than a bogus verdict
+            return {"live": False, "liveness_score": 0.0, "label": "no_face",
+                    "detection": dets[0]["method"] if dets else "none"}
         return {"live": label == "live",
                 "liveness_score": round(float(score), 4),
                 "label": label,
@@ -422,14 +432,24 @@ class FaceFlash:
             threshold = self._threshold_for_far(max_far)
 
         img = load_image(image_path)
-        face = detect_and_align(img)
 
         if check_liveness:
-            score, label = self.liveness.check(face)
+            # liveness needs the context crop from the box; get box + aligned
+            # face in one detect pass, use the box for liveness, crop for embed
+            dets = [d for d in detect_faces_boxes(img) if d["method"] == "scrfd"]
+            if not dets:
+                return {"matches": [], "filtered": "liveness: no_face",
+                        "time_ms": round((time.perf_counter() - start) * 1000, 2)}
+            d = max(dets, key=lambda d: (d["box"][2] - d["box"][0]) *
+                    (d["box"][3] - d["box"][1]))
+            face = d["crop"]
+            score, label = self.liveness.check_frame(img, d["box"])
             if label != "live":
                 return {"matches": [], "filtered": f"liveness: {label}",
                         "liveness_score": round(float(score), 4),
                         "time_ms": round((time.perf_counter() - start) * 1000, 2)}
+        else:
+            face = detect_and_align(img)
 
         embedding = self.embedder.embed(face)
 

@@ -28,8 +28,12 @@ MODEL_URL = (
 MODEL_DIR = Path.home() / ".faceflash" / "models"
 MODEL_PATH = MODEL_DIR / "minifasnet_v2.onnx"
 
-# Class labels from the model
-_LABELS = ["live", "print_attack", "replay_attack"]
+# Silent-Face-Anti-Spoofing convention: the MiniFASNet head outputs 3 classes
+# where index 1 is the REAL/live class; 0 and 2 are spoof types (2D print /
+# 3D replay in the upstream repo, but we don't reliably distinguish them from
+# this single model, so both report as "spoof").
+_LIVE_CLASS = 1
+_LABELS = ["spoof", "live", "spoof"]
 
 
 def _ensure_model() -> Path:
@@ -106,11 +110,10 @@ class LivenessDetector:
         logits = outputs[0][0]
         probs = _softmax(logits)
 
-        # Class 0 = live, class 1 = print, class 2 = replay
-        liveness_score = float(probs[0])
-        predicted_class = int(np.argmax(probs))
-        label = _LABELS[predicted_class]
-
+        # Silent-Face convention: class 1 is the live class. Score is P(live);
+        # label is consistent — "live" iff class 1 wins.
+        liveness_score = float(probs[_LIVE_CLASS])
+        label = _LABELS[int(np.argmax(probs))]
         return liveness_score, label
 
     def check_batch(self, face_images: list) -> list:
@@ -119,6 +122,39 @@ class LivenessDetector:
         Returns list of (liveness_score, label) tuples.
         """
         return [self.check(img) for img in face_images]
+
+    def check_frame(self, image_rgb: np.ndarray, box, bbox_scale: float = 2.7):
+        """Correct liveness path: crop the face region from the FULL frame at
+        the scale the model was trained on, not a tight aligned crop.
+
+        MiniFASNet '2.7_80x80' expects a crop that is ~2.7x the face box —
+        the face plus surrounding context. Passing a tight, aligned face
+        (the ArcFace crop) is out of distribution and flags live faces as
+        spoof. `box` is [x1, y1, x2, y2] in image pixels.
+        """
+        crop = _crop_with_scale(image_rgb, box, bbox_scale)
+        return self.check(crop)
+
+
+def _crop_with_scale(image, box, scale):
+    """Expand a face box by `scale` around its center (clamped to the image)
+    and return that region — mirrors Silent-Face-Anti-Spoofing's CropImage,
+    which is how the MiniFASNet weights were trained."""
+    src_h, src_w = image.shape[:2]
+    x1, y1, x2, y2 = box
+    w = max(1.0, x2 - x1)
+    h = max(1.0, y2 - y1)
+    # don't ask for more context than the image has
+    scale = min(scale, (src_h - 1) / h, (src_w - 1) / w)
+    new_w, new_h = w * scale, h * scale
+    cx, cy = x1 + w / 2.0, y1 + h / 2.0
+    left = int(round(cx - new_w / 2.0))
+    top = int(round(cy - new_h / 2.0))
+    right = int(round(left + new_w))
+    bottom = int(round(top + new_h))
+    left, top = max(0, left), max(0, top)
+    right, bottom = min(src_w, right), min(src_h, bottom)
+    return image[top:bottom, left:right]
 
 
 def _softmax(x: np.ndarray) -> np.ndarray:
