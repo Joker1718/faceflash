@@ -152,3 +152,45 @@ def test_cli_names_stats_remove_calibrate(tmp_path, capsys):
     assert main(["remove", "--name", "person_3"] + db) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["removed"] == 5 and out["index_size"] == 1495
+
+
+# ── streaming across sessions + bounding boxes ──────────────────────────────
+
+def test_streaming_pca_fit_across_sessions(tmp_path):
+    """Enroll below the PCA threshold, close, reopen, cross the threshold:
+    the fit must trigger and re-encode the session-1 rows on disk."""
+    rng = np.random.default_rng(21)
+    embs = rng.standard_normal((1300, 512)).astype(np.float32)
+    embs /= np.linalg.norm(embs, axis=1, keepdims=True)
+    db = str(tmp_path / "stream.db")
+
+    s1 = FaceIndex(db_path=db)
+    s1.add_batch(embs[:500], [f"p{i}" for i in range(500)])
+    assert not s1._pca_fitted
+    s1.close()
+
+    s2 = FaceIndex(db_path=db)
+    for i in range(500, 1300):
+        s2.add(embs[i], f"p{i}")
+    s2.search(embs[0], k=1)  # force flush
+    assert s2._pca_fitted
+    assert s2.search(embs[42], k=1)[0][0] == "p42"      # session-1 face
+    assert s2.search(embs[1200], k=1)[0][0] == "p1200"  # session-2 face
+    s2.close()
+
+    s3 = FaceIndex(db_path=db)
+    assert s3._pca_fitted and len(s3) == 1300
+    assert s3.search(embs[42], k=1)[0][0] == "p42"
+    s3.close()
+
+
+def test_detect_faces_boxes_fallback_shape():
+    from faceflash.detect import detect_faces_boxes
+    blank = np.zeros((200, 300, 3), dtype=np.uint8)
+    out = detect_faces_boxes(blank)
+    assert len(out) == 1
+    d = out[0]
+    assert d["method"] == "center_crop"
+    assert d["box"] == [50, 0, 250, 200]      # centered square in a 300x200 image
+    assert d["crop"].shape == (200, 200, 3)
+    assert d["det_score"] == 0.0

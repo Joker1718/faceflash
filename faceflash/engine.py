@@ -7,7 +7,7 @@ from typing import Optional
 import time
 
 from faceflash.detect import (load_image, detect_and_align,
-                              detect_and_align_info, detect_faces)
+                              detect_and_align_info, detect_faces_boxes)
 from faceflash.embed import FaceEmbedder
 from faceflash.index import FaceIndex
 from faceflash.attributes import FaceAttributes
@@ -87,9 +87,10 @@ class FaceFlash:
         return self._attributes
 
     @property
-    def liveness(self) -> LivenessDetector:
+    def liveness(self) -> "LivenessDetector":
         """Lazy-loaded anti-spoofing detector (~600KB model, downloads on first use)."""
         if self._liveness is None:
+            from faceflash.liveness import LivenessDetector
             self._liveness = LivenessDetector()
         return self._liveness
 
@@ -310,22 +311,23 @@ class FaceFlash:
         """Identify EVERY face in an image (group photos, camera frames).
 
         Returns one entry per detected face, in detection order:
-        {"faces": [{"face": 0, "matches": [...]}, ...], "time_ms": ...}
+        {"faces": [{"face": 0, "box": [x1, y1, x2, y2], "matches": [...]}, ...]}
         """
         start = time.perf_counter()
         if max_far is not None:
             threshold = self._threshold_for_far(max_far)
 
         img = load_image(image_path)
-        crops = detect_faces(img)
+        detections = detect_faces_boxes(img)
         faces = []
-        for fi, crop in enumerate(crops):
-            embedding = self.embedder.embed(crop)
+        for fi, d in enumerate(detections):
+            embedding = self.embedder.embed(d["crop"])
             results = self.index.search(
                 embedding, k=k, n_candidates=n_candidates or self.n_candidates)
             matches = [{"name": lbl, "confidence": round(float(sim), 4), "index": idx}
                        for lbl, sim, idx in results if sim >= threshold]
-            faces.append({"face": fi, "matches": matches})
+            faces.append({"face": fi, "box": d["box"],
+                          "det_score": d["det_score"], "matches": matches})
 
         out = {
             "faces": faces,

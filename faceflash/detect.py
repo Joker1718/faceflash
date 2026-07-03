@@ -35,28 +35,55 @@ def detect_and_align_info(img: np.ndarray):
 
 def detect_faces(img: np.ndarray) -> list:
     """All faces in image → list of 112x112 aligned crops."""
+    return [f["crop"] for f in detect_faces_boxes(img)]
+
+
+def detect_faces_boxes(img: np.ndarray) -> list:
+    """All faces in image, with locations.
+
+    Returns a list of dicts, one per face:
+      {"crop":   112x112 aligned RGB array,
+       "box":    [x1, y1, x2, y2] in image pixel coords,
+       "det_score": detector confidence (0-1; 0.0 for fallback paths),
+       "method": "scrfd" | "haar" | "center_crop"}
+    """
     try:
         from faceflash.align import get_detector, align_face
         det = get_detector()
         if det is not None:
             boxes, kps = det.detect(img)
             if len(boxes):
-                faces = [align_face(img, kps[i]) for i in range(len(boxes))]
-                faces = [f for f in faces if f is not None]
-                if faces:
-                    return faces
+                out = []
+                for i in range(len(boxes)):
+                    crop = align_face(img, kps[i])
+                    if crop is None:
+                        continue
+                    x1, y1, x2, y2 = (int(round(v)) for v in boxes[i][:4])
+                    out.append({"crop": crop,
+                                "box": [x1, y1, x2, y2],
+                                "det_score": round(float(boxes[i][4]), 4),
+                                "method": "scrfd"})
+                if out:
+                    return out
     except Exception:
         pass
-    return [_detect_haar_fallback(img)]
+    crop, method, box = _detect_haar_fallback_box(img)
+    return [{"crop": crop, "box": box, "det_score": 0.0, "method": method}]
 
 
 def _detect_haar_fallback(img: np.ndarray) -> np.ndarray:
     """Haar + center crop when SCRFD isn't available."""
-    return _detect_haar_fallback_info(img)[0]
+    return _detect_haar_fallback_box(img)[0]
 
 
 def _detect_haar_fallback_info(img: np.ndarray):
     """Haar crop (method='haar') or center crop (method='center_crop')."""
+    crop, method, _ = _detect_haar_fallback_box(img)
+    return crop, method
+
+
+def _detect_haar_fallback_box(img: np.ndarray):
+    """Returns (crop, method, [x1, y1, x2, y2])."""
     try:
         import cv2
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
@@ -72,7 +99,7 @@ def _detect_haar_fallback_info(img: np.ndarray):
             y1 = max(0, y - margin)
             x2 = min(w, x + fw + margin)
             y2 = min(h, y + fh + margin)
-            return img[y1:y2, x1:x2], "haar"
+            return img[y1:y2, x1:x2], "haar", [int(x1), int(y1), int(x2), int(y2)]
     except Exception:
         # cv2 missing OR broken (partial installs lack CascadeClassifier) —
         # degrade to the center crop rather than crashing register().
@@ -83,4 +110,5 @@ def _detect_haar_fallback_info(img: np.ndarray):
     size = min(h, w)
     top = (h - size) // 2
     left = (w - size) // 2
-    return img[top:top + size, left:left + size], "center_crop"
+    return (img[top:top + size, left:left + size], "center_crop",
+            [left, top, left + size, top + size])
