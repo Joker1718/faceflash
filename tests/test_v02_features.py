@@ -241,3 +241,114 @@ def test_unknown_profile_rejected():
     from faceflash.embed import ensure_model
     with pytest.raises(ValueError):
         ensure_model("turbo")
+
+
+# ── access control, consent, scoping, audit, dedup ──────────────────────────
+
+def _stub_engine_with(monkeypatch, ff, emb):
+    class FakeEmbedder:
+        def embed(self, face): return emb
+        def embed_batch(self, faces): return __import__("numpy").stack([emb]*len(faces))
+    monkeypatch.setattr(ff, "_embedder", FakeEmbedder())
+
+
+def test_schedule_parsing():
+    import datetime as dt
+    from faceflash.engine import _schedule_allows
+    wed_noon = dt.datetime(2026, 1, 7, 12, 0)   # Wednesday
+    sun_noon = dt.datetime(2026, 1, 11, 12, 0)  # Sunday
+    assert _schedule_allows("Mon-Fri 9:00-18:00", wed_noon)
+    assert not _schedule_allows("Mon-Fri 9:00-18:00", dt.datetime(2026, 1, 7, 20, 0))
+    assert not _schedule_allows("Mon-Fri 9:00-18:00", sun_noon)
+    assert _schedule_allows("Sat,Sun 10:00-14:00", sun_noon)
+
+
+def test_consent_expiry_excludes_from_search(tmp_path, monkeypatch):
+    from PIL import Image
+    img = tmp_path / "a.jpg"
+    Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8)).save(img)
+    rng = np.random.default_rng(0)
+    e = rng.standard_normal(512).astype(np.float32); e /= np.linalg.norm(e)
+
+    ff = FaceFlash(index_path=str(tmp_path / "g.db"))
+    _stub_engine_with(monkeypatch, ff, e)
+    ff.register("Alice", str(img), allow_fallback=True, check_duplicate=False)
+
+    # valid consent -> matches
+    ff.set_consent("Alice", "granted", expires="2999-01-01")
+    assert ff.search(str(img))["matches"][0]["name"] == "Alice"
+    # expired -> silently gone, but still stored
+    ff.set_consent("Alice", "granted", expires="2020-01-01")
+    assert ff.search(str(img))["matches"] == []
+    assert "Alice" in ff.index.names()
+    ff.index.close()
+
+
+def test_scoped_search_within(tmp_path, monkeypatch):
+    from PIL import Image
+    img = tmp_path / "a.jpg"
+    Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8)).save(img)
+    rng = np.random.default_rng(1)
+    shared = rng.standard_normal(512).astype(np.float32); shared /= np.linalg.norm(shared)
+
+    ff = FaceFlash(index_path=str(tmp_path / "g.db"))
+    _stub_engine_with(monkeypatch, ff, shared)
+    for nm in ("Alice", "Bob", "Carol"):
+        ff.register(nm, str(img), allow_fallback=True, check_duplicate=False)
+
+    names = {m["name"] for m in ff.search(str(img), k=5, within=["Alice", "Bob"])["matches"]}
+    assert names <= {"Alice", "Bob"} and "Carol" not in names
+    ff.index.close()
+
+
+def test_access_schedule_denies_outside_hours(tmp_path, monkeypatch):
+    from PIL import Image
+    img = tmp_path / "a.jpg"
+    Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8)).save(img)
+    rng = np.random.default_rng(2)
+    e = rng.standard_normal(512).astype(np.float32); e /= np.linalg.norm(e)
+
+    ff = FaceFlash(index_path=str(tmp_path / "g.db"))
+    _stub_engine_with(monkeypatch, ff, e)
+    ff.register("Bob", str(img), allow_fallback=True, check_duplicate=False)
+    ff.set_schedule("Bob", "Mon-Fri 9:00-9:01")   # essentially never now
+    m = ff.search(str(img), check_access=True)["matches"][0]
+    assert m["name"] == "Bob" and m["access"] == "denied"
+    ff.index.close()
+
+
+def test_audit_report(tmp_path, monkeypatch):
+    from PIL import Image
+    img = tmp_path / "a.jpg"
+    Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8)).save(img)
+    rng = np.random.default_rng(3)
+    e = rng.standard_normal(512).astype(np.float32); e /= np.linalg.norm(e)
+
+    ff = FaceFlash(index_path=str(tmp_path / "g.db"))
+    _stub_engine_with(monkeypatch, ff, e)
+    ff.register("Alice", str(img), allow_fallback=True, check_duplicate=False)
+    ff.set_consent("Alice", "granted", expires="2999-01-01")
+    ff.set_schedule("Alice", "Mon-Fri 9:00-18:00")
+
+    a = ff.audit("Alice")
+    assert a["enrolled_faces"] == 1
+    assert a["consent"] == "granted" and not a["consent_expired"]
+    assert a["schedule"] == "Mon-Fri 9:00-18:00"
+    ff.index.close()
+
+
+def test_gallery_dedup_finds_same_face_different_names(tmp_path, monkeypatch):
+    from PIL import Image
+    img = tmp_path / "a.jpg"
+    Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8)).save(img)
+    rng = np.random.default_rng(4)
+    same = rng.standard_normal(512).astype(np.float32); same /= np.linalg.norm(same)
+
+    ff = FaceFlash(index_path=str(tmp_path / "g.db"))
+    _stub_engine_with(monkeypatch, ff, same)
+    ff.register("Alice", str(img), allow_fallback=True, check_duplicate=False)
+    ff.register("Alice_dup", str(img), allow_fallback=True, check_duplicate=False)
+
+    dups = ff.find_duplicates(threshold=0.85)
+    assert dups and {dups[0]["a"], dups[0]["b"]} == {"Alice", "Alice_dup"}
+    ff.index.close()

@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value BLOB
 );
+CREATE TABLE IF NOT EXISTS person_meta (
+    name  TEXT NOT NULL,
+    key   TEXT NOT NULL,
+    value TEXT,
+    PRIMARY KEY (name, key)
+);
 """
 
 
@@ -695,6 +701,8 @@ class FaceIndex:
                 "pca_fitted": self._pca_fitted,
                 "far_calibration": getattr(self, "_calibration", None),
                 "extra_meta": getattr(self, "_extra_meta", {}),
+                "person_meta": {f"{k[0]}\x00{k[1]}": v for k, v in
+                                getattr(self, "_person_meta", {}).items()},
             }, f)
         # Persist quantizer if fitted
         if self._pca_fitted:
@@ -728,6 +736,8 @@ class FaceIndex:
         self._pca_fitted = meta.get("pca_fitted", False)
         self._calibration = meta.get("far_calibration")
         self._extra_meta = meta.get("extra_meta", {}) or {}
+        self._person_meta = {tuple(k.split("\x00", 1)): v for k, v in
+                             (meta.get("person_meta") or {}).items()}
         # Load quantizer if it was persisted
         quantizer_path = p / "quantizer"
         if quantizer_path.exists() and self._pca_fitted:
@@ -850,6 +860,64 @@ class FaceIndex:
                 v = row[0]
                 return v.decode() if isinstance(v, bytes) else str(v)
         return None
+
+    def set_person_meta(self, name: str, key: str, value: Optional[str]):
+        """Per-person fact (consent, schedule, ...). None deletes."""
+        if not hasattr(self, "_person_meta"):
+            self._person_meta = {}
+        if value is None:
+            self._person_meta.pop((name, key), None)
+        else:
+            self._person_meta[(name, key)] = value
+        if self._db is not None:
+            if value is None:
+                self._db.execute(
+                    "DELETE FROM person_meta WHERE name = ? AND key = ?", (name, key))
+            else:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO person_meta(name, key, value) VALUES (?, ?, ?)",
+                    (name, key, value))
+            self._db.commit()
+
+    def get_person_meta(self, name: str, key: str) -> Optional[str]:
+        v = getattr(self, "_person_meta", {}).get((name, key))
+        if v is not None:
+            return v
+        if self._db is not None:
+            row = self._db.execute(
+                "SELECT value FROM person_meta WHERE name = ? AND key = ?",
+                (name, key)).fetchone()
+            if row:
+                return row[0]
+        return None
+
+    def find_duplicates(self, threshold: float = 0.85,
+                        chunk: int = 512) -> List[dict]:
+        """Entries under DIFFERENT names whose faces strongly match — the
+        result of mislabeled or double enrollments. Runs the gallery against
+        itself via the normal search path (chunked; ~minutes at 1M)."""
+        self._flush_pending()
+        if self.count < 2:
+            return []
+        seen, out = set(), []
+        for start in range(0, self.count, chunk):
+            idxs = np.arange(start, min(start + chunk, self.count))
+            embs = self._embeddings_for(idxs)
+            results = self.search_batch(embs, k=3)
+            for row_i, res in zip(idxs, results):
+                for lbl, sim, j in res:
+                    if j == row_i or sim < threshold:
+                        continue
+                    if lbl == self.labels[row_i]:
+                        continue          # same person, fine
+                    pair = tuple(sorted((int(row_i), int(j))))
+                    if pair in seen:
+                        continue
+                    seen.add(pair)
+                    out.append({"a": self.labels[row_i], "b": lbl,
+                                "similarity": round(float(sim), 4),
+                                "index_a": int(row_i), "index_b": int(j)})
+        return sorted(out, key=lambda d: -d["similarity"])
 
     def set_calibration(self, calibration: dict):
         """Persist a FAR->threshold curve (DB meta table, or in-memory +

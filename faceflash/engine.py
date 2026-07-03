@@ -63,6 +63,47 @@ def _threshold_from_curve(curve, max_far: float) -> float:
     return pts[-1][1]
 
 
+_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _schedule_allows(rule: str, when) -> bool:
+    """Evaluate "Mon-Fri 9:00-18:00" / "Sat,Sun 10:00-14:00" style rules."""
+    try:
+        parts = rule.strip().split()
+        days_part = parts[0].lower()
+        allowed_days = set()
+        for token in days_part.split(","):
+            if "-" in token:
+                a, b = token.split("-")
+                ia, ib = _DAYS.index(a[:3]), _DAYS.index(b[:3])
+                allowed_days.update(range(ia, ib + 1))
+            else:
+                allowed_days.add(_DAYS.index(token[:3]))
+        if when.weekday() not in allowed_days:
+            return False
+        if len(parts) > 1:
+            start_s, end_s = parts[1].split("-")
+            h1, m1 = (list(map(int, start_s.split(":"))) + [0])[:2]
+            h2, m2 = (list(map(int, end_s.split(":"))) + [0])[:2]
+            minutes = when.hour * 60 + when.minute
+            return h1 * 60 + m1 <= minutes <= h2 * 60 + m2
+        return True
+    except Exception:
+        logger.warning("unparseable schedule rule %r — denying", rule)
+        return False
+
+
+def _consent_expired(expires: Optional[str]) -> bool:
+    if not expires:
+        return False
+    import datetime as _dt
+    try:
+        return _dt.date.today() > _dt.date.fromisoformat(expires)
+    except ValueError:
+        logger.warning("bad consent expiry %r — treating as expired", expires)
+        return True
+
+
 class FaceFlash:
     """Face search engine. Register faces, search by image, verify pairs."""
 
@@ -124,7 +165,9 @@ class FaceFlash:
 
     def register(self, name: str, image_path: str,
                  allow_fallback: bool = False,
-                 check_duplicate: bool = True) -> dict:
+                 check_duplicate: bool = True,
+                 consent: Optional[str] = None,
+                 consent_expires: Optional[str] = None) -> dict:
         """Add a face to the gallery.
 
         Raises NoFaceFoundError if no face was detected anywhere in the image
@@ -160,6 +203,11 @@ class FaceFlash:
                                           "confidence": round(float(sim), 4)}
 
         self.index.add(embedding, name, image_path)
+        if consent is not None:
+            self.index.set_person_meta(name, "consent", consent)
+        if consent_expires is not None:
+            self.index.set_person_meta(name, "consent_expires", consent_expires)
+            result["consent_expires"] = consent_expires
         result["index_size"] = self.index.count
         return result
 
@@ -197,6 +245,83 @@ class FaceFlash:
         face = detect_and_align(img)
         attrs = self.attributes.analyze(face)
         return attrs
+
+    def set_consent(self, name: str, consent: str,
+                    expires: Optional[str] = None):
+        """Record consent for an enrolled person. After `expires`
+        (YYYY-MM-DD) they are silently excluded from search results —
+        still stored, just never matched — until re-consented."""
+        self.index.set_person_meta(name, "consent", consent)
+        self.index.set_person_meta(name, "consent_expires", expires)
+
+    def set_schedule(self, name: str, allowed_hours: str):
+        """Per-person access schedule, e.g. "Mon-Fri 9:00-18:00".
+        Checked by search(..., check_access=True): a face can match and
+        still be denied outside its hours."""
+        import datetime as _dt
+        if not _schedule_allows(allowed_hours, _dt.datetime(2026, 1, 5, 12, 0)) \
+                and not _schedule_allows(allowed_hours, _dt.datetime(2026, 1, 10, 12, 0)):
+            # neither a weekday noon nor a weekend noon parses as allowed AND
+            # the parser logged nothing valid -> most likely a bad rule
+            logger.warning("schedule %r may be unparseable — verify format "
+                           "'Mon-Fri 9:00-18:00'", allowed_hours)
+        self.index.set_person_meta(name, "schedule", allowed_hours)
+
+    def _filter_matches(self, matches, within=None, check_access=False):
+        """Apply consent expiry (always), scope, and schedule to raw matches."""
+        out = []
+        scope = set(within) if within else None
+        import datetime as _dt
+        now = _dt.datetime.now()
+        for m in matches:
+            name = m["name"]
+            if _consent_expired(self.index.get_person_meta(name, "consent_expires")):
+                continue                     # silently unmatchable
+            if scope is not None and name not in scope:
+                continue
+            if check_access:
+                rule = self.index.get_person_meta(name, "schedule")
+                if rule and not _schedule_allows(rule, now):
+                    m["access"] = "denied"
+                    m["reason"] = f"outside scheduled hours ({rule})"
+                else:
+                    m["access"] = "allowed"
+            out.append(m)
+        return out
+
+    def find_duplicates(self, threshold: float = 0.85) -> list:
+        """Different names, same face — mislabels and double enrollments."""
+        return self.index.find_duplicates(threshold=threshold)
+
+    def audit(self, name: str) -> dict:
+        """Everything the system knows about one person — enrollment,
+        consent state, schedule, and every persisted stream event that
+        references them. The raw material for a GDPR data subject
+        access request."""
+        self.index._flush_pending()
+        out = {"name": name,
+               "enrolled_faces": sum(1 for l in self.index.labels if l == name),
+               "consent": self.index.get_person_meta(name, "consent"),
+               "consent_expires": self.index.get_person_meta(name, "consent_expires"),
+               "consent_expired": _consent_expired(
+                   self.index.get_person_meta(name, "consent_expires")),
+               "schedule": self.index.get_person_meta(name, "schedule"),
+               "events": []}
+        db = getattr(self.index, "_db", None)
+        if db is not None:
+            try:
+                import json as _json
+                rows = db.execute(
+                    "SELECT ts, event_type, data FROM stream_events "
+                    "WHERE data LIKE ? ORDER BY ts", (f'%"{name}"%',)).fetchall()
+                out["events"] = [
+                    {"timestamp": r[0], "event_type": r[1], "data": _json.loads(r[2])}
+                    for r in rows
+                    if name in _json.loads(r[2]).values()
+                ]
+            except Exception as e:
+                logger.warning("audit event query failed: %s", e)
+        return out
 
     def check_liveness(self, image_path: str) -> dict:
         """Anti-spoofing check on the main face in an image.
@@ -250,6 +375,8 @@ class FaceFlash:
                n_candidates: Optional[int] = None,
                max_far: Optional[float] = None,
                check_liveness: bool = False,
+               within: Optional[list] = None,
+               check_access: bool = False,
                with_attributes: bool = False,
                age_filter: Optional[str] = None,
                min_age: Optional[int] = None,
@@ -298,7 +425,10 @@ class FaceFlash:
         embed_time = time.perf_counter() - start
 
         search_start = time.perf_counter()
-        results = self.index.search(embedding, k=k, n_candidates=n_candidates or self.n_candidates)
+        # scoped search / consent filtering may drop candidates — fetch deeper
+        k_search = k if within is None else max(k * 10, 50)
+        results = self.index.search(embedding, k=k_search,
+                                    n_candidates=n_candidates or self.n_candidates)
         search_time = time.perf_counter() - search_start
 
         total_time = time.perf_counter() - start
@@ -312,6 +442,8 @@ class FaceFlash:
                     "index": idx,
                 }
                 matches.append(match_info)
+        matches = self._filter_matches(matches, within=within,
+                                       check_access=check_access)[:k]
 
         result = {
             "matches": matches,

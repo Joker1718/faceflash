@@ -159,6 +159,20 @@ class _VisitorRegistry:
     def count(self) -> int:
         return len(self._ids)
 
+    def sightings(self, visitor_id: str) -> int:
+        with self._lock:
+            try:
+                return self._counts[self._ids.index(visitor_id)]
+            except ValueError:
+                return 0
+
+    def centroid(self, visitor_id: str) -> Optional[np.ndarray]:
+        with self._lock:
+            try:
+                return self._centroids[self._ids.index(visitor_id)].copy()
+            except ValueError:
+                return None
+
 
 class _LatestFrameReader:
     """Capture thread that always holds only the newest frame.
@@ -535,7 +549,10 @@ class StreamMonitor:
                  min_sharpness: float = 20.0,
                  swap_threshold: float = 0.35,
                  camera_name: Optional[str] = None,
-                 snapshot_dir: Optional[str] = None):
+                 snapshot_dir: Optional[str] = None,
+                 mode: str = "identify",
+                 watchlist: Optional[List[str]] = None,
+                 suggest_enroll_after: int = 5):
         """
         engine: a FaceFlash instance with a loaded gallery.
         sample_fps: how many frames/sec to process (lower = less CPU).
@@ -586,6 +603,22 @@ class StreamMonitor:
             person_appeared / visitor_new events (path lands in the event
             data, queryable via events()). Off by default: this stores images
             of everyone, including strangers — check your consent obligations.
+        mode: what identification is allowed to happen —
+            "identify"  (default) match everyone against the gallery.
+            "anonymous" NEVER identify: counts unique visitors, dwell, flow,
+                        zones — the gallery is never consulted. Legally a
+                        different activity than face recognition in many
+                        jurisdictions (analytics, not identification).
+            "watchlist" only report matches to the given `watchlist` names;
+                        everyone else is ignored — no identity, no visitor
+                        record, nothing stored about them. "Is this one of
+                        the N people I care about?" instead of "who is this?"
+        watchlist: names for mode="watchlist". A match emits a
+            watchlist_match event.
+        suggest_enroll_after: when an unregistered visitor has been sighted
+            this many times, emit ONE enrollment_suggested event — passive
+            gallery building ("Seen 5x — assign a name?"). Use
+            enroll_visitor(visitor_id, name) to accept.
         """
         self.engine = engine
         self.sample_fps = sample_fps
@@ -616,7 +649,19 @@ class StreamMonitor:
         self.swap_threshold = swap_threshold
         self.camera_name = camera_name
         self.snapshot_dir = snapshot_dir
+        if mode not in ("identify", "anonymous", "watchlist"):
+            raise ValueError(f"mode must be identify/anonymous/watchlist, got {mode!r}")
+        if mode == "watchlist" and not watchlist:
+            raise ValueError('mode="watchlist" needs a watchlist of names')
+        self.mode = mode
+        self.watchlist = set(watchlist or [])
+        self.suggest_enroll_after = suggest_enroll_after
+        self._enroll_suggested: set = set()
         self.zones: Dict[str, list] = {}
+        self._capacity: Optional[tuple] = None      # (limit, zone_or_None)
+        self._capacity_breached = False
+        self._secure_zones: set = set()
+        self._tailgating_active: set = set()
         self._engine_lock = threading.Lock()   # shared when multi-camera
         self._detector = None          # lazy; False = tried and failed
 
@@ -645,6 +690,19 @@ class StreamMonitor:
         if isinstance(callback, str):
             callback = _WebhookSender(callback)
         self._callbacks.append(callback)
+
+    def set_capacity(self, max_people: int, zone: Optional[str] = None):
+        """Fire ONE capacity_exceeded event when the live face count (whole
+        frame, or one zone) goes over the limit; re-arms when it drops back."""
+        self._capacity = (int(max_people), zone)
+
+    def set_secure_zone(self, zone_name: str):
+        """Anti-tailgating: if this zone ever contains an identified person
+        AND an unidentified face in the same frame, emit tailgating_risk
+        (once per episode). Define the zone with add_zone() first."""
+        if zone_name not in self.zones:
+            raise ValueError(f"unknown zone {zone_name!r} — add_zone() it first")
+        self._secure_zones.add(zone_name)
 
     def add_zone(self, name: str, polygon):
         """Define a named zone as a polygon of (x, y) pixel coords.
@@ -870,6 +928,36 @@ class StreamMonitor:
                                            {"zone": z, "name": who}))
                 track.zones = now_in
 
+        # Capacity enforcement (whole frame or one zone), one event per breach
+        if self._capacity is not None:
+            limit, zone = self._capacity
+            if zone is None:
+                count = len(active_tracks)
+            else:
+                count = sum(1 for t in active_tracks if zone in t.zones)
+            if count > limit and not self._capacity_breached:
+                self._capacity_breached = True
+                self._emit(StreamEvent("capacity_exceeded", timestamp,
+                                       {"count": count, "limit": limit,
+                                        "zone": zone}))
+            elif count <= limit:
+                self._capacity_breached = False
+
+        # Anti-tailgating: identified + unidentified together in a secure zone
+        for z in self._secure_zones:
+            inside = [t for t in active_tracks if z in t.zones]
+            has_known = any(t.identity for t in inside)
+            unknowns = [t for t in inside if not t.identity]
+            if has_known and unknowns:
+                if z not in self._tailgating_active:
+                    self._tailgating_active.add(z)
+                    self._emit(StreamEvent("tailgating_risk", timestamp,
+                                           {"zone": z,
+                                            "authorized": [t.identity for t in inside if t.identity],
+                                            "unidentified_count": len(unknowns)}))
+            else:
+                self._tailgating_active.discard(z)
+
         # Opt-in event replay: snapshot the face behind person_appeared
         if self.snapshot_dir and appeared:
             self._save_snapshots(appeared, active_tracks, crop_by_box, timestamp)
@@ -885,6 +973,20 @@ class StreamMonitor:
 
         self._prev_identities = current_identities
         return active_tracks
+
+    def enroll_visitor(self, visitor_id: str, name: str) -> bool:
+        """Accept an enrollment_suggested: register the visitor's mean
+        embedding under a real name. (A photo enrollment is still better —
+        the centroid averages pose/lighting — but this turns a repeat
+        stranger into a known person with zero photo handling.)"""
+        emb = self.visitors.centroid(visitor_id)
+        if emb is None:
+            return False
+        with self._engine_lock:
+            self.engine.index.add(emb.astype(np.float32), name)
+        self._emit(StreamEvent("visitor_enrolled", time.time(),
+                               {"visitor_id": visitor_id, "name": name}))
+        return True
 
     def report(self) -> Dict[str, Any]:
         """Analytics snapshot incl. the unique-unregistered-visitor count."""
@@ -1040,6 +1142,7 @@ class StreamMonitor:
         if self.max_far is not None:
             threshold = self.engine._threshold_for_far(self.max_far)
 
+        anonymous = self.mode == "anonymous"
         for (track, _, q), embedding in zip(pairs, embeddings):
             # Swap guard: the tracker matches by position, so when two people
             # cross paths a track can end up on the WRONG face. If the new
@@ -1074,15 +1177,33 @@ class StreamMonitor:
                     if track.identity is not None:
                         continue        # identity restored, no gallery search needed
 
-            with self._engine_lock:
-                results = self.engine.index.search(
-                    embedding, k=1,
-                    n_candidates=self.engine.n_candidates)
+            results = []
+            if not anonymous:               # anonymous mode never asks "who"
+                with self._engine_lock:
+                    results = self.engine.index.search(
+                        embedding, k=1,
+                        n_candidates=self.engine.n_candidates)
             if results and results[0][1] >= threshold:
-                track.identity = results[0][0]
-                track.confidence = results[0][1]
-            elif track.visitor_id is None:
-                # Unregistered: count them as a unique anonymous visitor
+                name = results[0][0]
+                if self.mode == "watchlist":
+                    if name in self.watchlist:
+                        if track.identity != name:
+                            self._emit(StreamEvent("watchlist_match", time.time(),
+                                                   {"name": name,
+                                                    "confidence": round(float(results[0][1]), 4)}))
+                        track.identity = name
+                        track.confidence = results[0][1]
+                    # non-watchlist match: ignore entirely — no identity,
+                    # no visitor record, nothing stored about them
+                else:
+                    track.identity = name
+                    track.confidence = results[0][1]
+            elif self.mode == "watchlist":
+                pass                        # strangers leave no trace either
+            elif self.mode != "watchlist":
+                # Unregistered: fold every sighting into the visitor cluster
+                # (re-assign each time so the sighting count actually grows —
+                # that's what progressive enrollment keys off of).
                 vid, is_new = self.visitors.assign(embedding)
                 track.visitor_id = vid
                 if is_new:
@@ -1093,6 +1214,13 @@ class StreamMonitor:
                         if path:
                             data["snapshot"] = path
                     self._emit(StreamEvent("visitor_new", time.time(), data))
+            if track.visitor_id is not None and \
+                    track.visitor_id not in self._enroll_suggested and \
+                    self.visitors.sightings(track.visitor_id) >= self.suggest_enroll_after:
+                self._enroll_suggested.add(track.visitor_id)
+                self._emit(StreamEvent("enrollment_suggested", time.time(),
+                                       {"visitor_id": track.visitor_id,
+                                        "sightings": self.visitors.sightings(track.visitor_id)}))
 
     def _draw_frame(self, frame, tracks: List[Track]):
         """Annotate frame with track boxes and names (for show=True)."""

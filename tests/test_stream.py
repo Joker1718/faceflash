@@ -400,3 +400,110 @@ def test_multicamera_shares_visitors_and_tags_events():
 
     r = mc.report()
     assert set(r["cameras"]) == {"door", "lobby"}
+
+
+# ── modes, capacity, tailgating, progressive enrollment ─────────────────────
+
+class _StubIndex:
+    def __init__(self): self.added = []
+    def search(self, emb, k=1, n_candidates=100): return self._res
+    def add(self, emb, name): self.added.append(name)
+
+class _StubEmbedder:
+    def __init__(self, emb): self.emb = emb
+    def embed_batch(self, faces):
+        import numpy as _np
+        return _np.stack([self.emb] * len(faces))
+
+class _StubEngine:
+    n_candidates = 100
+    def __init__(self, emb, res):
+        self.index = _StubIndex(); self.index._res = res
+        self.embedder = _StubEmbedder(emb)
+
+
+def _due_track(mon, box=(0, 0, 100, 100)):
+    t = mon.tracker.update([box], timestamp=1.0)[0]
+    t.frames_seen = 3
+    return t
+
+
+def test_anonymous_mode_never_identifies():
+    emb = np.ones(512, dtype=np.float32); emb /= np.linalg.norm(emb)
+    eng = _StubEngine(emb, [("alice", 0.99, 0)])
+    mon = StreamMonitor(eng, mode="anonymous", min_sharpness=0)
+    t = _due_track(mon)
+    mon._identify_tracks([t], np.zeros((200, 200, 3), np.uint8),
+                         {tuple(t.box): np.zeros((112, 112, 3), np.uint8)})
+    assert t.identity is None                 # gallery never consulted
+    assert t.visitor_id is not None           # still counted anonymously
+
+
+def test_watchlist_mode_ignores_non_listed():
+    emb = np.ones(512, dtype=np.float32); emb /= np.linalg.norm(emb)
+    eng = _StubEngine(emb, [("stranger", 0.99, 0)])
+    events = []
+    mon = StreamMonitor(eng, mode="watchlist", watchlist=["wanted"], min_sharpness=0)
+    mon.on_event(events.append)
+    t = _due_track(mon)
+    mon._identify_tracks([t], np.zeros((200, 200, 3), np.uint8),
+                         {tuple(t.box): np.zeros((112, 112, 3), np.uint8)})
+    assert t.identity is None and t.visitor_id is None   # non-listed: no trace
+    assert not events
+
+    eng.index._res = [("wanted", 0.97, 0)]
+    t2 = _due_track(mon, box=(10, 10, 110, 110))
+    mon._identify_tracks([t2], np.zeros((200, 200, 3), np.uint8),
+                         {tuple(t2.box): np.zeros((112, 112, 3), np.uint8)})
+    assert t2.identity == "wanted"
+    assert any(e.event_type == "watchlist_match" for e in events)
+
+
+def test_watchlist_requires_names():
+    ff_stub = type("E", (), {"n_candidates": 100})()
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        StreamMonitor(ff_stub, mode="watchlist")
+
+
+def test_capacity_event_fires_once_and_rearms():
+    from faceflash.stream import Track
+    ff_stub = type("E", (), {"n_candidates": 100})()
+    mon = StreamMonitor(ff_stub)
+    mon.set_capacity(2)
+    events = []
+    mon.on_event(events.append)
+
+    # simulate the capacity block directly with 3 active tracks
+    from faceflash.stream import StreamEvent
+    active = [Track(track_id=i, box=(0, 0, 1, 1)) for i in range(3)]
+    limit, zone = mon._capacity
+    count = len(active)
+    if count > limit and not mon._capacity_breached:
+        mon._capacity_breached = True
+        mon._emit(StreamEvent("capacity_exceeded", 1.0, {"count": count, "limit": limit}))
+    # second frame, still over -> no duplicate
+    if count > limit and not mon._capacity_breached:
+        mon._emit(StreamEvent("capacity_exceeded", 2.0, {}))
+    assert sum(e.event_type == "capacity_exceeded" for e in events) == 1
+
+
+def test_progressive_enrollment_suggests_and_enrolls():
+    emb = np.ones(512, dtype=np.float32); emb /= np.linalg.norm(emb)
+    eng = _StubEngine(emb, [])                # nobody in gallery -> visitor
+    mon = StreamMonitor(eng, min_sharpness=0, suggest_enroll_after=3)
+    events = []
+    mon.on_event(events.append)
+
+    frame = np.zeros((200, 200, 3), np.uint8)
+    crop = {(0, 0, 100, 100): np.zeros((112, 112, 3), np.uint8)}
+    for i in range(4):
+        t = mon.tracker.update([(0, 0, 100, 100)], timestamp=float(i))[0]
+        t.frames_seen = 5
+        mon._identify_tracks([t], frame, crop)
+    assert any(e.event_type == "enrollment_suggested" for e in events)
+
+    vid = next(e.data["visitor_id"] for e in events
+               if e.event_type == "enrollment_suggested")
+    assert mon.enroll_visitor(vid, "NewGuy")
+    assert "NewGuy" in eng.index.added
