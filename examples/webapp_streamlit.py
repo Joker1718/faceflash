@@ -35,8 +35,9 @@ DB_PATH = "faceflash_demo.db"
 
 
 @st.cache_resource
-def get_engine(profile="light"):
-    """Lazy-load FaceFlash engine (cached across reruns)."""
+def get_engine(profile=None):
+    """Lazy-load FaceFlash engine (cached across reruns).
+    profile=None auto-detects from an existing gallery."""
     from faceflash import FaceFlash
     return FaceFlash(DB_PATH, profile=profile)
 
@@ -196,6 +197,62 @@ def main():
             with col_ctrl2:
                 run_stream = st.checkbox("Start live detection", value=False,
                                           key="stream_run")
+
+            # ── Zone configuration ──────────────────────────────────────────
+            with st.expander("Define zones (optional)"):
+                st.caption("Draw restricted areas, entrances, etc. Faces entering/exiting zones trigger events.")
+
+                # Simple coordinate-based zone input
+                zone_name = st.text_input("Zone name", placeholder="e.g. entrance", key="zone_name")
+                zone_coords = st.text_input(
+                    "Polygon coordinates (x1,y1 x2,y2 x3,y3 ...)",
+                    placeholder="0,0 300,0 300,400 0,400",
+                    key="zone_coords",
+                    help="Pixel coordinates. Capture a frame first to see dimensions."
+                )
+
+                col_z1, col_z2 = st.columns(2)
+                with col_z1:
+                    is_secure = st.checkbox("Secure zone (anti-tailgating)", key="zone_secure")
+                with col_z2:
+                    zone_capacity = st.number_input("Max capacity (0 = no limit)", min_value=0,
+                                                     value=0, key="zone_cap")
+
+                if st.button("Add zone", key="btn_add_zone"):
+                    if zone_name and zone_coords:
+                        try:
+                            points = []
+                            for pair in zone_coords.strip().split():
+                                x, y = pair.split(",")
+                                points.append((int(x), int(y)))
+                            if len(points) < 3:
+                                st.error("Need at least 3 points.")
+                            else:
+                                zones = st.session_state.get("zones", [])
+                                zones.append({
+                                    "name": zone_name,
+                                    "polygon": points,
+                                    "secure": is_secure,
+                                    "capacity": zone_capacity if zone_capacity > 0 else None
+                                })
+                                st.session_state["zones"] = zones
+                                st.success(f"Zone '{zone_name}' added ({len(points)} points)")
+                        except Exception as e:
+                            st.error(f"Bad format: {e}. Use: x1,y1 x2,y2 x3,y3")
+                    else:
+                        st.warning("Enter zone name and coordinates.")
+
+                # Show defined zones
+                zones = st.session_state.get("zones", [])
+                if zones:
+                    st.write("**Defined zones:**")
+                    for i, z in enumerate(zones):
+                        st.caption(f"  {z['name']}: {z['polygon']}"
+                                   + (" [SECURE]" if z['secure'] else "")
+                                   + (f" [max {z['capacity']}]" if z['capacity'] else ""))
+                    if st.button("Clear all zones", key="btn_clear_zones"):
+                        st.session_state["zones"] = []
+                        st.rerun()
 
             if run_stream:
                 # Layout: video on left, analytics on right
