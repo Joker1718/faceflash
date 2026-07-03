@@ -1,7 +1,5 @@
 """Minimal FastAPI operator API for camera/zone/event management."""
 
-from __future__ import annotations
-
 from typing import Optional
 
 
@@ -12,7 +10,7 @@ def create_app(db_path: str):
     Run with: uvicorn 'faceflash.operator_api:create_app("faces.db")'
     """
     try:
-        from fastapi import FastAPI, HTTPException
+        from fastapi import Body, FastAPI, HTTPException
         from pydantic import BaseModel
     except ImportError as e:
         raise ImportError(
@@ -34,6 +32,11 @@ def create_app(db_path: str):
         polygon: list
         secure: bool = False
         settings: dict = {}
+
+    class AiEventSearchIn(BaseModel):
+        question: str
+        limit: int = 100
+        now: Optional[float] = None
 
     @app.get("/status")
     def status():
@@ -83,5 +86,30 @@ def create_app(db_path: str):
         return {"events": mon.events(event_type=event_type,
                                      since=since,
                                      limit=limit)}
+
+    @app.post("/ai/search-events")
+    def ai_search_events(body: AiEventSearchIn = Body(...)):
+        from faceflash.ai import answer_event_question
+        from faceflash.stream import StreamMonitor
+
+        mon = StreamMonitor(ff, persist_events=True)
+        events = mon.events(limit=max(1000, body.limit * 5))
+        return answer_event_question(
+            events, body.question, now=body.now, limit=body.limit)
+
+    @app.post("/ai/summarize-incident")
+    def ai_summarize_incident(body: AiEventSearchIn = Body(...)):
+        from faceflash.ai import answer_event_question
+        from faceflash.stream import StreamMonitor
+
+        mon = StreamMonitor(ff, persist_events=True)
+        events = mon.events(limit=max(1000, body.limit * 5))
+        result = answer_event_question(
+            events, body.question, now=body.now, limit=body.limit)
+        return {
+            "summary": result["summary"],
+            "count": result["count"],
+            "query": result["query"],
+        }
 
     return app

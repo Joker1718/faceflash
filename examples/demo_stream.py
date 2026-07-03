@@ -53,11 +53,11 @@ def main():
     # Create stream monitor
     monitor = StreamMonitor(
         ff,
-        sample_fps=2.0,           # process 2 frames/sec
-        identify_interval=10,     # re-identify every 10 frames
+        sample_fps=3.0,           # process 3 frames/sec (light profile is fast enough)
+        identify_interval=15,     # re-identify every 15 frames
         threshold=0.4,
         iou_threshold=0.3,
-        max_missed_frames=30,     # keep track alive for 15 sec at 2fps
+        max_missed_frames=10,     # drop ghost boxes faster
         visit_gap_seconds=60,     # 1 min gap = new visit (short for demo)
         anomaly_threshold=5,      # alert after 5 sightings
     )
