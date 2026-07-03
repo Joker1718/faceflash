@@ -42,13 +42,34 @@ def test_tracker_matches_and_ages():
 
 
 def test_tracker_greedy_matching_prefers_best_iou():
-    tr = IOUTracker(iou_threshold=0.1, max_missed=5)
+    tr = IOUTracker(iou_threshold=0.1, max_missed=5, box_smoothing=0)
     tr.update([(0, 0, 100, 100), (80, 0, 180, 100)], timestamp=1.0)
     a, b = tr.tracks
     # detection overlapping A strongly and B weakly must go to A
     tr.update([(5, 0, 105, 100), (85, 0, 185, 100)], timestamp=2.0)
     assert a.box == (5, 0, 105, 100)
     assert b.box == (85, 0, 185, 100)
+
+
+def test_tracker_box_smoothing_damps_jitter():
+    tr = IOUTracker(box_smoothing=0.5)
+    tr.update([(100, 100, 200, 200)], timestamp=1.0)
+    tr.update([(110, 100, 210, 200)], timestamp=2.0)   # jitter +10px
+    x1 = tr.tracks[0].box[0]
+    assert 100 < x1 < 110          # blended, not snapped
+
+
+def test_display_grace_keeps_track_visible_through_missed_frames():
+    ff_stub = type("E", (), {"n_candidates": 100})()
+    mon = StreamMonitor(ff_stub, display_grace=3)
+    mon.tracker.update([(0, 0, 50, 50)], timestamp=1.0)
+    assert len(mon._visible_tracks()) == 1
+    mon.tracker.update([], timestamp=2.0)   # detector blinks
+    mon.tracker.update([], timestamp=3.0)
+    assert len(mon._visible_tracks()) == 1  # still drawn (grace)
+    for ts in (4.0, 5.0):
+        mon.tracker.update([], timestamp=ts)
+    assert len(mon._visible_tracks()) == 0  # grace exhausted
 
 
 def test_analytics_visits_and_dwell():

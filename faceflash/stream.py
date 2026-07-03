@@ -171,7 +171,8 @@ class IOUTracker:
     """
 
     def __init__(self, iou_threshold: float = 0.3, max_missed: int = 15,
-                 reid_retention_seconds: float = 120.0):
+                 reid_retention_seconds: float = 120.0,
+                 box_smoothing: float = 0.5):
         """
         iou_threshold: minimum IOU to associate a detection with a track.
         max_missed: drop a track after this many consecutive frames without a match.
@@ -182,6 +183,7 @@ class IOUTracker:
         self.iou_threshold = iou_threshold
         self.max_missed = max_missed
         self.reid_retention = reid_retention_seconds
+        self.box_smoothing = box_smoothing
         self.tracks: List[Track] = []
         self.lost: List[Track] = []       # dropped-but-remembered (have embeddings)
         self._next_id = 0
@@ -245,8 +247,17 @@ class IOUTracker:
         for score, ti, di in pairs:
             if ti in matched_tracks or di in matched_dets:
                 continue
-            # Update track
-            self.tracks[ti].box = detections[di]
+            # Update track. The raw detection box jitters a few pixels every
+            # frame; blend it with the previous box so the drawn rectangle is
+            # steady. (Matching already happened, so smoothing can't break it.)
+            if self.box_smoothing > 0:
+                a = self.box_smoothing
+                old_box = self.tracks[ti].box
+                self.tracks[ti].box = tuple(
+                    int(round(a * o + (1 - a) * n))
+                    for o, n in zip(old_box, detections[di]))
+            else:
+                self.tracks[ti].box = detections[di]
             self.tracks[ti].last_seen = timestamp
             self.tracks[ti].frames_seen += 1
             self.tracks[ti].frames_missed = 0
@@ -421,7 +432,8 @@ class StreamMonitor:
                  reid_threshold: float = 0.65,
                  persist_events: bool = True,
                  det_size: int = 480,
-                 det_model: str = "10g"):
+                 det_model: str = "10g",
+                 display_grace: int = 4):
         """
         engine: a FaceFlash instance with a loaded gallery.
         sample_fps: how many frames/sec to process (lower = less CPU).
@@ -445,6 +457,11 @@ class StreamMonitor:
             still (7.9ms @480 on CPU) at some accuracy cost on small/hard
             faces. det_model="500m", det_size=320 runs a full pipeline in
             ~10ms/frame on plain CPU (Raspberry-Pi territory).
+        display_grace: keep drawing a track (and counting its identity as
+            present) for this many processed frames after the detector last
+            saw it. Detectors blink on single frames constantly; without
+            grace, boxes/names flash on and off and person_left/appeared
+            events churn. 0 restores the strict old behavior.
         """
         self.engine = engine
         self.sample_fps = sample_fps
@@ -466,6 +483,7 @@ class StreamMonitor:
         self._prev_identities = set()
         self.det_size = det_size
         self.det_model = det_model
+        self.display_grace = display_grace
         self._detector = None          # lazy; False = tried and failed
 
         # Persist events into the SAME faces.db the gallery lives in, so
@@ -588,8 +606,7 @@ class StreamMonitor:
                 if now - last_proc < min_gap:
                     # Not due for processing — keep the display smooth
                     if show:
-                        self._draw_frame(frame, [t for t in self.tracker.tracks
-                                                 if t.frames_missed == 0])
+                        self._draw_frame(frame, self._visible_tracks())
                         cv2.imshow("FaceFlash Stream", frame)
                         if cv2.waitKey(1) & 0xFF == ord('q'):
                             break
@@ -626,8 +643,7 @@ class StreamMonitor:
             # Show every frame (smooth video) but only process some
             if frame_idx % frame_interval != 0:
                 if show:
-                    self._draw_frame(frame, [t for t in self.tracker.tracks
-                                             if t.frames_missed == 0])
+                    self._draw_frame(frame, self._visible_tracks())
                     cv2.imshow("FaceFlash Stream", frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
@@ -657,15 +673,19 @@ class StreamMonitor:
         tracks = self.tracker.update(boxes, timestamp)
         self.analytics.update(tracks, timestamp)
 
-        # Only identify tracks that need it (expensive — do sparingly).
-        # All due tracks in this frame embed in ONE batched ONNX call.
-        active_tracks = [t for t in tracks if t.frames_missed == 0]
-        due = [t for t in active_tracks
+        # Only identify tracks actually detected THIS frame (their aligned
+        # crops exist). All due tracks embed in ONE batched ONNX call.
+        detected_now = [t for t in tracks if t.frames_missed == 0]
+        due = [t for t in detected_now
                if (t.identity is None and t.frames_seen >= 3)
                or (t.identity is not None and
                    t.frames_seen % self.identify_interval == 0)]
         if due:
             self._identify_tracks(due, frame_rgb, crop_by_box)
+
+        # Display + presence use a grace window: a single missed detection
+        # must not blank the overlay or fire person_left/appeared churn.
+        active_tracks = self._visible_tracks()
 
         # Events
         current_identities = {t.identity for t in active_tracks if t.identity}
@@ -683,8 +703,8 @@ class StreamMonitor:
         for name in current_identities:
             self.analytics.person_update(name, timestamp)
 
-        # Anomaly check
-        for track in active_tracks:
+        # Anomaly check (counts only frames the face was actually detected)
+        for track in detected_now:
             if track.identity is None and track.frames_seen > 10:
                 self.analytics.unknown_sightings[track.track_id] += 1
         for a in self.analytics.get_anomalies():
@@ -694,6 +714,11 @@ class StreamMonitor:
 
         self._prev_identities = current_identities
         return active_tracks
+
+    def _visible_tracks(self) -> List[Track]:
+        """Tracks to draw / count as present: detected recently enough."""
+        return [t for t in self.tracker.tracks
+                if t.frames_missed <= self.display_grace]
 
     def _get_detector(self):
         """Stream-owned SCRFD at det_size (the shared one is fixed at 640)."""
