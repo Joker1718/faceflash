@@ -84,3 +84,22 @@ class TestSearchCorrectness:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+def test_search_parallel_flag_gives_identical_results():
+    """serial / parallel / auto must return the same matches (same
+    deterministic tie-breaking in both kernels)."""
+    import numpy as np
+    from faceflash.index import FaceIndex
+
+    rng = np.random.default_rng(17)
+    embs = rng.standard_normal((3000, 512)).astype(np.float32)
+    embs /= np.linalg.norm(embs, axis=1, keepdims=True)
+    idx = FaceIndex()
+    idx.add_batch(embs, [f"p{i}" for i in range(3000)])
+
+    for q in embs[::500]:
+        a = idx.search(q, k=3, parallel=False)
+        b = idx.search(q, k=3, parallel=True)
+        c = idx.search(q, k=3)          # auto
+        assert a == b == c

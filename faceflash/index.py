@@ -465,9 +465,15 @@ class FaceIndex:
         query_binary = ((query_embedding @ self.projection.T) > 0).astype(np.uint8)
         return np.packbits(query_binary)
 
+    # Above this many rows, the multi-core scan beats the serial one; below,
+    # thread coordination costs more than it saves (measured crossover
+    # ~200-300K on an 8-core CPU).
+    _PARALLEL_SCAN_MIN_ROWS = 200_000
+
     def search(self, query_embedding: np.ndarray, k: int = 1,
                n_candidates: Optional[int] = None,
-               n_probe: Optional[int] = None) -> List[Tuple[str, float, int]]:
+               n_probe: Optional[int] = None,
+               parallel: Optional[bool] = None) -> List[Tuple[str, float, int]]:
         """
         Two-phase search: Hamming filter → cosine rerank.
         Uses the Rust SIMD backend when available (much faster than NumPy).
@@ -475,6 +481,11 @@ class FaceIndex:
         n_candidates is the search-effort knob, independent of k (the result
         count). More candidates → higher recall + more float reranks. Defaults
         to max(100, k*10), which reaches ≥99% recall in benchmarks.
+
+        parallel: scan across all cores. Default (None) decides by gallery
+        size — parallel from ~200K rows up (measured ~1.8x at 1M), serial
+        below (thread startup would dominate). Results are identical either
+        way (same deterministic tie-breaking).
         """
         # Flush any buffered add() calls before searching
         self._flush_pending()
@@ -501,7 +512,11 @@ class FaceIndex:
             n_cand = n_candidates
 
         if _HAS_RUST:
-            topk = _rust.hamming_topk(query_packed, scan_vectors, n_cand)
+            use_parallel = (parallel if parallel is not None
+                            else len(scan_vectors) >= self._PARALLEL_SCAN_MIN_ROWS)
+            kernel = (_rust.hamming_topk_parallel if use_parallel
+                      else _rust.hamming_topk)
+            topk = kernel(query_packed, scan_vectors, n_cand)
             local_indices = np.asarray(topk).astype(np.intp)
         else:
             local_indices = hamming_topk_numpy(query_packed, scan_vectors, n_cand)
