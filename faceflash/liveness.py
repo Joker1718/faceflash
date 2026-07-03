@@ -63,10 +63,8 @@ class LivenessDetector:
             ) from e
 
         model_path = _ensure_model()
-        self.session = ort.InferenceSession(
-            str(model_path),
-            providers=["CPUExecutionProvider"]
-        )
+        from faceflash.runtime import make_session
+        self.session = make_session(model_path)
         self.input_name = self.session.get_inputs()[0].name
 
     def preprocess(self, face_img: np.ndarray) -> np.ndarray:

@@ -70,18 +70,8 @@ class FaceEmbedder:
             ) from e
         self.profile = profile
         model_path = ensure_model(profile)
-        # Prefer GPU → CPU fallback
-        available = ort.get_available_providers()
-        if "CUDAExecutionProvider" in available:
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        elif "CoreMLExecutionProvider" in available:
-            providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
-        else:
-            providers = ["CPUExecutionProvider"]
-        self.session = ort.InferenceSession(
-            str(model_path),
-            providers=providers
-        )
+        from faceflash.runtime import make_session
+        self.session = make_session(model_path)
         self.input_name = self.session.get_inputs()[0].name
         self.input_shape = self.session.get_inputs()[0].shape  # [1, 3, 112, 112]
 

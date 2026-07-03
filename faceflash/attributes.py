@@ -42,9 +42,8 @@ class AgeGenderEstimator:
     def __init__(self):
         import onnxruntime as ort
         _download(GENDERAGE_URL, GENDERAGE_PATH)
-        self.session = ort.InferenceSession(
-            str(GENDERAGE_PATH), providers=["CPUExecutionProvider"]
-        )
+        from faceflash.runtime import make_session
+        self.session = make_session(GENDERAGE_PATH)
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
         self.input_size = inp.shape[2]  # usually 96 or 112
@@ -88,9 +87,8 @@ class EmotionEstimator:
     def __init__(self):
         import onnxruntime as ort
         _download(EMOTION_URL, EMOTION_PATH)
-        self.session = ort.InferenceSession(
-            str(EMOTION_PATH), providers=["CPUExecutionProvider"]
-        )
+        from faceflash.runtime import make_session
+        self.session = make_session(EMOTION_PATH)
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
         # FER+ expects 64x64 grayscale typically, or 1x1x64x64

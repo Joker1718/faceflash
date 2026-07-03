@@ -406,3 +406,38 @@ def test_legacy_remove_keeps_person_meta_and_calibration(tmp_path):
     idx3 = FaceIndex(); idx3.load(str(tmp_path / "dir"))
     assert idx3.get_person_meta("person_0", "consent") == "granted"
     assert idx3.get_calibration() is not None
+
+
+# ── execution provider selection ─────────────────────────────────────────────
+
+def test_provider_selection_excludes_static_only_for_detector(monkeypatch):
+    import faceflash.runtime as rt
+
+    class FakeORT:
+        @staticmethod
+        def get_available_providers():
+            return ["CoreMLExecutionProvider", "OpenVINOExecutionProvider",
+                    "CPUExecutionProvider"]
+    monkeypatch.setitem(__import__("sys").modules, "onnxruntime", FakeORT)
+    monkeypatch.delenv("FACEFLASH_PROVIDERS", raising=False)
+
+    # embedder (static shapes) may use accelerators (OpenVINO ranks first)
+    assert rt.select_providers(dynamic_shapes=False)[0] == "OpenVINOExecutionProvider"
+    # detector (dynamic shapes) must fall through to CPU only
+    assert rt.select_providers(dynamic_shapes=True) == ["CPUExecutionProvider"]
+
+
+def test_provider_env_override(monkeypatch):
+    import faceflash.runtime as rt
+
+    class FakeORT:
+        @staticmethod
+        def get_available_providers():
+            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    monkeypatch.setitem(__import__("sys").modules, "onnxruntime", FakeORT)
+
+    monkeypatch.setenv("FACEFLASH_PROVIDERS", "CPUExecutionProvider")
+    assert rt.select_providers() == ["CPUExecutionProvider"]
+    # unavailable forced provider is dropped, CPU still appended
+    monkeypatch.setenv("FACEFLASH_PROVIDERS", "TensorRTExecutionProvider")
+    assert rt.select_providers() == ["CPUExecutionProvider"]

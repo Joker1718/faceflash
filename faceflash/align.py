@@ -78,16 +78,11 @@ class FaceDetector:
                  input_size: int = 640, model: str = "10g"):
         """model: "10g" (default, most accurate) or "500m" (~20x less
         compute — same SCRFD family, same outputs, for CPU-tight setups)."""
-        import onnxruntime as ort
         model_path = _ensure_det_model(model)
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] \
-            if "CUDAExecutionProvider" in ort.get_available_providers() \
-            else ["CPUExecutionProvider"]
-        so = ort.SessionOptions()
-        so.log_severity_level = 3   # the model's shape metadata assumes 640x640;
-                                    # other input sizes work but warn per inference
-        self.session = ort.InferenceSession(str(model_path), sess_options=so,
-                                            providers=providers)
+        from faceflash.runtime import make_session
+        # dynamic_shapes: the detector runs at variable input sizes, which
+        # static-shape providers (CoreML/OpenVINO/XNNPACK) miscompile.
+        self.session = make_session(model_path, quiet=True, dynamic_shapes=True)
         self.input_name = self.session.get_inputs()[0].name
         self.output_names = [o.name for o in self.session.get_outputs()]
         self.det_thresh = det_thresh
