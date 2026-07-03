@@ -679,6 +679,7 @@ class FaceIndex:
                 "count": self.count,
                 "pca_fitted": self._pca_fitted,
                 "far_calibration": getattr(self, "_calibration", None),
+                "extra_meta": getattr(self, "_extra_meta", {}),
             }, f)
         # Persist quantizer if fitted
         if self._pca_fitted:
@@ -711,6 +712,7 @@ class FaceIndex:
         self.count = meta["count"]
         self._pca_fitted = meta.get("pca_fitted", False)
         self._calibration = meta.get("far_calibration")
+        self._extra_meta = meta.get("extra_meta", {}) or {}
         # Load quantizer if it was persisted
         quantizer_path = p / "quantizer"
         if quantizer_path.exists() and self._pca_fitted:
@@ -809,6 +811,30 @@ class FaceIndex:
             keep = lbls[a] != lbls[b]
             sims.extend(np.einsum('ij,ij->i', embs[a[keep]], embs[b[keep]]).tolist())
         return np.array(sims[:want], dtype=np.float32)
+
+    def set_meta(self, key: str, value: str):
+        """Persist a small engine-level fact with the index (e.g. which
+        embedding model enrolled this gallery). DB mode: meta table; legacy:
+        in-memory + metadata.json on save."""
+        if not hasattr(self, "_extra_meta"):
+            self._extra_meta = {}
+        self._extra_meta[key] = value
+        if self._db is not None:
+            self._db.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                (f"x_{key}", value))
+            self._db.commit()
+
+    def get_meta(self, key: str) -> Optional[str]:
+        if getattr(self, "_extra_meta", {}).get(key) is not None:
+            return self._extra_meta[key]
+        if self._db is not None:
+            row = self._db.execute(
+                "SELECT value FROM meta WHERE key = ?", (f"x_{key}",)).fetchone()
+            if row:
+                v = row[0]
+                return v.decode() if isinstance(v, bytes) else str(v)
+        return None
 
     def set_calibration(self, calibration: dict):
         """Persist a FAR->threshold curve (DB meta table, or in-memory +

@@ -56,13 +56,19 @@ class FaceFlash:
     """Face search engine. Register faces, search by image, verify pairs."""
 
     def __init__(self, index_path: Optional[str] = None,
-                 n_bits: int = 512, n_candidates: int = 100):
+                 n_bits: int = 512, n_candidates: int = 100,
+                 profile: Optional[str] = None):
         """
         index_path: a .db file opens (or creates) the write-through SQLite
             backend — every register() persists immediately, no save() needed.
             A directory path loads a legacy .npy snapshot if it exists.
         n_bits: code length. 512 = full recall, 256 = half memory / ~99% recall.
         n_candidates: how many to shortlist before float rerank. Tradeoff knob.
+        profile: embedding model — "accurate" (ArcFace r50, default) or
+            "light" (MobileFaceNet, ~8x faster on plain CPU, slightly lower
+            accuracy). The two are incompatible embedding spaces: a gallery
+            remembers which profile enrolled it, and opening it with the
+            other raises. Omit to adopt the gallery's stored profile.
         """
         self._embedder: Optional[FaceEmbedder] = None
         self._attributes: Optional[FaceAttributes] = None
@@ -75,10 +81,20 @@ class FaceFlash:
             if index_path and Path(index_path).exists():
                 self.index.load(index_path)
 
+        stored = self.index.get_meta("embed_profile")
+        if stored and profile and profile != stored:
+            raise ValueError(
+                f"This gallery was enrolled with the {stored!r} embedding "
+                f"model; opening it with profile={profile!r} would compare "
+                f"incompatible embeddings. Re-enroll to switch profiles.")
+        self.profile = profile or stored or "accurate"
+        if not stored:
+            self.index.set_meta("embed_profile", self.profile)
+
     @property
     def embedder(self) -> FaceEmbedder:
         if self._embedder is None:
-            self._embedder = FaceEmbedder()
+            self._embedder = FaceEmbedder(profile=self.profile)
         return self._embedder
 
     @property
@@ -213,8 +229,14 @@ class FaceFlash:
         cal = self.index.get_calibration()
         if cal:
             return _threshold_from_curve(cal["curve"], max_far)
-        logger.info("max_far=%g using shipped LFW anchors — run calibrate() "
-                    "to measure thresholds on your own gallery", max_far)
+        if self.profile != "accurate":
+            logger.warning("max_far=%g falling back to LFW anchors that were "
+                           "measured with the 'accurate' model — with the %r "
+                           "profile, run calibrate() for meaningful rates",
+                           max_far, self.profile)
+        else:
+            logger.info("max_far=%g using shipped LFW anchors — run calibrate() "
+                        "to measure thresholds on your own gallery", max_far)
         return _threshold_from_curve(_LFW_FAR_CURVE, max_far)
 
     def search(self, image_path: str, k: int = 1, threshold: float = 0.4,

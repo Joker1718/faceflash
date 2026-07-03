@@ -32,13 +32,21 @@ ARCFACE_TEMPLATE = np.array([
 ], dtype=np.float32)
 
 
-def _ensure_det_model():
-    if DET_PATH.exists():
-        return DET_PATH
+# Lighter SCRFD variant (same architecture/decode, ~20x less compute):
+# measured 7.9ms vs 43.9ms per 480x480 frame on plain CPU.
+DET_500M_URL = ("https://huggingface.co/immich-app/buffalo_s/resolve/main/"
+                "detection/model.onnx")
+DET_500M_PATH = MODEL_DIR / "det_500m.onnx"
+
+
+def _ensure_det_model(model: str = "10g"):
+    url, path = (DET_URL, DET_PATH) if model == "10g" else (DET_500M_URL, DET_500M_PATH)
+    if path.exists():
+        return path
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info("Downloading SCRFD face detector (~17MB)...")
-    urllib.request.urlretrieve(DET_URL, DET_PATH)
-    return DET_PATH
+    logger.info("Downloading SCRFD face detector (%s)...", model)
+    urllib.request.urlretrieve(url, path)
+    return path
 
 
 def _distance2points(anchor_centers, distance):
@@ -67,9 +75,11 @@ class FaceDetector:
     _NUM_ANCHORS = 2
 
     def __init__(self, det_thresh: float = 0.5, nms_thresh: float = 0.4,
-                 input_size: int = 640):
+                 input_size: int = 640, model: str = "10g"):
+        """model: "10g" (default, most accurate) or "500m" (~20x less
+        compute — same SCRFD family, same outputs, for CPU-tight setups)."""
         import onnxruntime as ort
-        model_path = _ensure_det_model()
+        model_path = _ensure_det_model(model)
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] \
             if "CUDAExecutionProvider" in ort.get_available_providers() \
             else ["CPUExecutionProvider"]

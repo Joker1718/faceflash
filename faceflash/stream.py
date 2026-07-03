@@ -420,7 +420,8 @@ class StreamMonitor:
                  anomaly_threshold: int = 3,
                  reid_threshold: float = 0.65,
                  persist_events: bool = True,
-                 det_size: int = 480):
+                 det_size: int = 480,
+                 det_model: str = "10g"):
         """
         engine: a FaceFlash instance with a loaded gallery.
         sample_fps: how many frames/sec to process (lower = less CPU).
@@ -440,6 +441,10 @@ class StreamMonitor:
             480 -> 42ms, 320 -> 21ms per frame). 480 (default) is right for
             typical webcam/door-cam faces; use 640 when faces are small in
             the frame, 320 when CPU is tight.
+        det_model: "10g" (default) or "500m" — the light SCRFD is ~5x faster
+            still (7.9ms @480 on CPU) at some accuracy cost on small/hard
+            faces. det_model="500m", det_size=320 runs a full pipeline in
+            ~10ms/frame on plain CPU (Raspberry-Pi territory).
         """
         self.engine = engine
         self.sample_fps = sample_fps
@@ -460,6 +465,7 @@ class StreamMonitor:
         self._alerted_tracks = set()   # anomaly alerts already emitted
         self._prev_identities = set()
         self.det_size = det_size
+        self.det_model = det_model
         self._detector = None          # lazy; False = tried and failed
 
         # Persist events into the SAME faces.db the gallery lives in, so
@@ -694,7 +700,8 @@ class StreamMonitor:
         if self._detector is None:
             try:
                 from faceflash.align import FaceDetector
-                self._detector = FaceDetector(input_size=self.det_size)
+                self._detector = FaceDetector(input_size=self.det_size,
+                                              model=self.det_model)
             except Exception as e:
                 logger.warning("SCRFD unavailable (%s) — using Haar fallback", e)
                 self._detector = False

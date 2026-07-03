@@ -7,6 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## [0.2.0] - 2026-07-02
 
 ### Added
+- **Model profiles (CPU-first).** `FaceFlash(profile="light")` swaps ArcFace
+  r50 + SCRFD 10g for MobileFaceNet + SCRFD 500m: measured on plain CPU,
+  embedding 51ms -> 6ms/face and detection 44ms -> 8ms/frame (~7x end to
+  end), 13 MB of models instead of 183 MB, slightly lower accuracy. Same
+  512-d index format, but incompatible embedding spaces: the gallery
+  records its profile and refuses to open with the other one.
+  StreamMonitor gains det_size (default 480; 640/320 tradeoffs measured)
+  and det_model="500m".
 - **FAR-calibrated thresholds.** `search(..., max_far=0.001)` /
   `verify(..., max_far=...)` set the decision threshold as a target
   false-accept rate instead of a raw cosine value. `calibrate()` measures

@@ -263,6 +263,23 @@ ff.search("query.jpg", n_candidates=200)       # per-query override
 
 Past 500K you can trade recall for speed with IVF clustering: `ff.index.build_clusters(n_probe=16)` gives ~5× at ~88% recall, `n_probe=32` gives ~2.8× at ~93%.
 
+### CPU is the point — pick a model profile
+
+Everything here targets plain CPUs; there is no GPU path and no plan for one. Two model stacks, measured on CPU (per face / per 480px frame):
+
+| | accurate (default) | light |
+|---|---|---|
+| Embedding | ArcFace r50 — 51ms | MobileFaceNet — **6ms** |
+| Detection | SCRFD 10g — 44ms | SCRFD 500m — **8ms** |
+| Model download | 166 MB | 13 MB |
+| Accuracy | benchmark numbers above | slightly lower (InsightFace buffalo_s stack) |
+
+```python
+ff = FaceFlash("faces.db", profile="light")    # ~7x faster on a Pi-class CPU
+```
+
+The two profiles are incompatible embedding spaces — a gallery remembers which one enrolled it and refuses to open with the other. With `light`, run `ff.calibrate()` before using `max_far` (the shipped LFW anchors were measured with the accurate model). For streams: `StreamMonitor(ff, det_model="500m", det_size=320)` processes a frame in ~10ms on plain CPU.
+
 ```
 faceflash/
 ├── engine.py         high-level API (register, search, verify)

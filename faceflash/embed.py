@@ -7,33 +7,59 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# w600k_r50 — the exact model every benchmark number was measured with.
-MODEL_URL = ("https://huggingface.co/public-data/insightface/resolve/main/"
-             "models/buffalo_l/w600k_r50.onnx")
 MODEL_DIR = Path.home() / ".faceflash" / "models"
-MODEL_PATH = MODEL_DIR / "w600k_r50.onnx"
-# Older installs (and the RunPod script) cached the same weights under a
-# misleading name; reuse them instead of re-downloading 166MB.
+
+# Two embedding models, one storage format (both output 512-d):
+#   accurate — ArcFace w600k_r50, the model every benchmark was measured with.
+#   light    — MobileFaceNet (buffalo_s). ~8x faster on plain CPU
+#              (measured 6.1ms vs 50.9ms per face); slightly lower accuracy.
+# The two produce INCOMPATIBLE embedding spaces: a gallery enrolled with one
+# cannot be searched with the other. The index records its profile and the
+# engine refuses to mix them.
+PROFILES = {
+    "accurate": {
+        "url": ("https://huggingface.co/public-data/insightface/resolve/main/"
+                "models/buffalo_l/w600k_r50.onnx"),
+        "file": "w600k_r50.onnx",
+        "size_mb": 166,
+    },
+    "light": {
+        "url": ("https://huggingface.co/immich-app/buffalo_s/resolve/main/"
+                "recognition/model.onnx"),
+        "file": "w600k_mbf.onnx",
+        "size_mb": 13,
+    },
+}
+# Older installs (and the RunPod script) cached w600k_r50 under a misleading
+# name; reuse it instead of re-downloading 166MB.
 _LEGACY_MODEL_PATH = MODEL_DIR / "arcface_r100.onnx"
 
+# Backward-compat module attributes
+MODEL_URL = PROFILES["accurate"]["url"]
+MODEL_PATH = MODEL_DIR / PROFILES["accurate"]["file"]
 
-def ensure_model():
-    """Download model if missing."""
-    if MODEL_PATH.exists():
-        return MODEL_PATH
-    if _LEGACY_MODEL_PATH.exists():
+
+def ensure_model(profile: str = "accurate"):
+    """Download the profile's embedding model if missing."""
+    if profile not in PROFILES:
+        raise ValueError(f"Unknown profile {profile!r}; use one of {list(PROFILES)}")
+    spec = PROFILES[profile]
+    path = MODEL_DIR / spec["file"]
+    if path.exists():
+        return path
+    if profile == "accurate" and _LEGACY_MODEL_PATH.exists():
         return _LEGACY_MODEL_PATH
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info("Downloading ArcFace model (~166MB)...")
-    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-    logger.info("Saved model to %s", MODEL_PATH)
-    return MODEL_PATH
+    logger.info("Downloading %s embedding model (~%dMB)...", profile, spec["size_mb"])
+    urllib.request.urlretrieve(spec["url"], path)
+    logger.info("Saved model to %s", path)
+    return path
 
 
 class FaceEmbedder:
     """ArcFace ONNX inference. Picks GPU if available."""
 
-    def __init__(self):
+    def __init__(self, profile: str = "accurate"):
         try:
             import onnxruntime as ort
         except ImportError as e:
@@ -42,7 +68,8 @@ class FaceEmbedder:
                 "  pip install faceflash[cpu]   # CPU\n"
                 "  pip install faceflash[gpu]   # CUDA"
             ) from e
-        model_path = ensure_model()
+        self.profile = profile
+        model_path = ensure_model(profile)
         # Prefer GPU → CPU fallback
         available = ort.get_available_providers()
         if "CUDAExecutionProvider" in available:

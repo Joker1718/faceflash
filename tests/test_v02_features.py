@@ -194,3 +194,50 @@ def test_detect_faces_boxes_fallback_shape():
     assert d["box"] == [50, 0, 250, 200]      # centered square in a 300x200 image
     assert d["crop"].shape == (200, 200, 3)
     assert d["det_score"] == 0.0
+
+
+# ── model profiles (CPU-first) ───────────────────────────────────────────────
+
+def test_profile_persists_and_guards_mismatch(tmp_path):
+    """A gallery remembers which embedding model enrolled it; mixing raises."""
+    embs, labels = _gallery()
+    db = str(tmp_path / "g.db")
+
+    ff = FaceFlash(index_path=db, profile="light")
+    ff.index.add_batch(embs, labels)
+    assert ff.profile == "light"
+    ff.index.close()
+
+    # reopening without a profile adopts the stored one
+    ff2 = FaceFlash(index_path=db)
+    assert ff2.profile == "light"
+    ff2.index.close()
+
+    # explicit mismatch is an error, not silent garbage results
+    with pytest.raises(ValueError):
+        FaceFlash(index_path=db, profile="accurate")
+
+
+def test_default_profile_is_accurate(tmp_path):
+    ff = FaceFlash(index_path=str(tmp_path / "d.db"))
+    assert ff.profile == "accurate"
+    assert ff.index.get_meta("embed_profile") == "accurate"
+    ff.index.close()
+
+
+def test_index_meta_roundtrip_legacy(tmp_path):
+    embs, labels = _gallery(n=100)
+    idx = FaceIndex()
+    idx.add_batch(embs, labels)
+    idx.set_meta("embed_profile", "light")
+    idx.save(str(tmp_path / "dir"))
+
+    idx2 = FaceIndex()
+    idx2.load(str(tmp_path / "dir"))
+    assert idx2.get_meta("embed_profile") == "light"
+
+
+def test_unknown_profile_rejected():
+    from faceflash.embed import ensure_model
+    with pytest.raises(ValueError):
+        ensure_model("turbo")
