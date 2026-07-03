@@ -121,14 +121,24 @@ class _VisitorRegistry:
     pseudonymous ID).
     """
 
-    def __init__(self, threshold: float = 0.55):
+    # Default threshold is DATA-DRIVEN, not a hunch: on LFW pairs
+    # (bench_far_frr.py) cosine 0.55 misses ~40% of same-person pairs across
+    # sessions (fragmenting one stranger into several "visitors"), while 0.45
+    # still has a near-zero false-merge rate (FAR ~0.0005%). 0.45 trades a
+    # tiny chance of merging two strangers for far fewer duplicate IDs.
+    def __init__(self, threshold: float = 0.45):
         self.threshold = threshold
         self._ids: List[str] = []
         self._centroids: List[np.ndarray] = []
         self._counts: List[int] = []
+        self._lock = threading.Lock()   # shared across cameras in multicam
 
     def assign(self, embedding: np.ndarray) -> tuple:
-        """Returns (visitor_id, is_new)."""
+        """Returns (visitor_id, is_new). Thread-safe."""
+        with self._lock:
+            return self._assign_locked(embedding)
+
+    def _assign_locked(self, embedding: np.ndarray) -> tuple:
         if self._centroids:
             sims = np.array([float(np.dot(c, embedding)) for c in self._centroids])
             best = int(sims.argmax())
@@ -649,10 +659,13 @@ class StreamMonitor:
             event.data.setdefault("camera", self.camera_name)
         if self._events_db is not None:
             try:
-                self._events_db.execute(
-                    "INSERT INTO stream_events(ts, event_type, data) VALUES (?, ?, ?)",
-                    (event.timestamp, event.event_type, json.dumps(event.data)))
-                self._events_db.commit()
+                # the lock matters under MultiCameraMonitor: N camera threads
+                # share ONE sqlite connection, which is not concurrency-safe
+                with self._engine_lock:
+                    self._events_db.execute(
+                        "INSERT INTO stream_events(ts, event_type, data) VALUES (?, ?, ?)",
+                        (event.timestamp, event.event_type, json.dumps(event.data)))
+                    self._events_db.commit()
             except Exception as e:
                 logger.warning("event persistence failed: %s", e)
         for cb in self._callbacks:
@@ -886,24 +899,31 @@ class StreamMonitor:
             r["zones"] = counts
         return r
 
-    def _save_snapshots(self, appeared, active_tracks, crop_by_box, timestamp):
-        """Write a JPEG of each newly-appeared person's crop (opt-in replay)."""
+    def _write_snapshot(self, name: str, crop, timestamp: float) -> Optional[str]:
+        """Write one crop JPEG into snapshot_dir; returns the path or None."""
         try:
             from PIL import Image
             from pathlib import Path as _P
             out = _P(self.snapshot_dir)
             out.mkdir(parents=True, exist_ok=True)
-            for name in appeared:
-                track = next((t for t in active_tracks if t.identity == name), None)
-                crop = crop_by_box.get(tuple(track.box)) if track else None
-                if crop is None:
-                    continue
-                fname = f"{int(timestamp)}_{name}.jpg"
-                Image.fromarray(crop).save(out / fname, quality=85)
-                self._emit(StreamEvent("snapshot", timestamp,
-                                       {"name": name, "path": str(out / fname)}))
+            path = out / f"{int(timestamp)}_{name}.jpg"
+            Image.fromarray(crop).save(path, quality=85)
+            return str(path)
         except Exception as e:
             logger.warning("snapshot save failed: %s", e)
+            return None
+
+    def _save_snapshots(self, appeared, active_tracks, crop_by_box, timestamp):
+        """Write a JPEG of each newly-appeared person's crop (opt-in replay)."""
+        for name in appeared:
+            track = next((t for t in active_tracks if t.identity == name), None)
+            crop = crop_by_box.get(tuple(track.box)) if track else None
+            if crop is None:
+                continue
+            path = self._write_snapshot(name, crop, timestamp)
+            if path:
+                self._emit(StreamEvent("snapshot", timestamp,
+                                       {"name": name, "path": path}))
 
     def _visible_tracks(self) -> List[Track]:
         """Tracks to draw / count as present: seen enough times to be real
@@ -1066,9 +1086,13 @@ class StreamMonitor:
                 vid, is_new = self.visitors.assign(embedding)
                 track.visitor_id = vid
                 if is_new:
-                    self._emit(StreamEvent("visitor_new", time.time(),
-                                           {"visitor_id": vid,
-                                            "unique_visitors": self.visitors.count}))
+                    data = {"visitor_id": vid,
+                            "unique_visitors": self.visitors.count}
+                    if self.snapshot_dir:
+                        path = self._write_snapshot(vid, face, time.time())
+                        if path:
+                            data["snapshot"] = path
+                    self._emit(StreamEvent("visitor_new", time.time(), data))
 
     def _draw_frame(self, frame, tracks: List[Track]):
         """Annotate frame with track boxes and names (for show=True)."""
