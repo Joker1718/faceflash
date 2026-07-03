@@ -118,13 +118,13 @@ def run_doctor(camera: Optional[int] = None) -> dict:
     """Return a JSON-serializable diagnostic report."""
     checks = {
         "python": {
-            "ok": sys.version_info >= (3, 10),
+            "ok": sys.version_info >= (3, 9),
             "version": sys.version.split()[0],
             "executable": sys.executable,
             "platform": platform.platform(),
             "machine": platform.machine(),
-            "fix": None if sys.version_info >= (3, 10)
-            else "Use Python 3.10 or newer.",
+            "fix": None if sys.version_info >= (3, 9)
+            else "Use Python 3.9 or newer.",
         },
         "numpy": _check_import("numpy", "numpy"),
         "pillow": _check_import("PIL", "Pillow"),
