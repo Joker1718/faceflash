@@ -1135,9 +1135,12 @@ class StreamMonitor:
                 pairs.append((track, face, q))
             if not pairs:
                 return
-            with self._engine_lock:
-                embeddings = self.engine.embedder.embed_batch(
-                    [f for _, f, _ in pairs])
+            # Embedding is ONNX inference — session.run() is thread-safe, so
+            # it runs OUTSIDE the lock. In multi-camera mode this lets every
+            # camera embed concurrently; only the SQLite index.search() below
+            # (not thread-safe on a shared connection) needs serializing.
+            embeddings = self.engine.embedder.embed_batch(
+                [f for _, f, _ in pairs])
         except Exception as e:
             logger.debug("Batch identify failed: %s", e)
             return
