@@ -60,14 +60,6 @@ class FaceEmbedder:
     """ArcFace ONNX inference. Picks GPU if available."""
 
     def __init__(self, profile: str = "accurate"):
-        try:
-            import onnxruntime as ort
-        except ImportError as e:
-            raise ImportError(
-                "onnxruntime is required for embeddings. Install one of:\n"
-                "  pip install faceflash[cpu]   # CPU\n"
-                "  pip install faceflash[gpu]   # CUDA"
-            ) from e
         self.profile = profile
         model_path = ensure_model(profile)
         from faceflash.runtime import make_session

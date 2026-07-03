@@ -54,14 +54,6 @@ class LivenessDetector:
     """
 
     def __init__(self):
-        try:
-            import onnxruntime as ort
-        except ImportError as e:
-            raise ImportError(
-                "onnxruntime is required for liveness detection. "
-                "Install: pip install faceflash[cpu]"
-            ) from e
-
         model_path = _ensure_model()
         from faceflash.runtime import make_session
         self.session = make_session(model_path)

@@ -40,7 +40,6 @@ class AgeGenderEstimator:
     """Age + gender from a face crop. InsightFace genderage model."""
 
     def __init__(self):
-        import onnxruntime as ort
         _download(GENDERAGE_URL, GENDERAGE_PATH)
         from faceflash.runtime import make_session
         self.session = make_session(GENDERAGE_PATH)
@@ -85,7 +84,6 @@ class EmotionEstimator:
     """Facial emotion recognition. 8 classes (FER+)."""
 
     def __init__(self):
-        import onnxruntime as ort
         _download(EMOTION_URL, EMOTION_PATH)
         from faceflash.runtime import make_session
         self.session = make_session(EMOTION_PATH)

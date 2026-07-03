@@ -3,8 +3,11 @@
 import logging
 import numpy as np
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import time
+
+if TYPE_CHECKING:
+    from faceflash.liveness import LivenessDetector
 
 from faceflash.detect import (load_image, detect_and_align,
                               detect_and_align_info, detect_faces_boxes)

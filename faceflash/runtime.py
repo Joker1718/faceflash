@@ -51,7 +51,15 @@ def select_providers(dynamic_shapes: bool = False):
     Honors FACEFLASH_PROVIDERS (comma-separated) if set; otherwise picks the
     single best available provider with CPU as fallback.
     """
-    import onnxruntime as ort
+    try:
+        import onnxruntime as ort
+    except ImportError as e:
+        raise ImportError(
+            "onnxruntime is required for face models. Install one of:\n"
+            "  pip install faceflash[cpu]      # CPU (default)\n"
+            "  pip install faceflash[gpu]      # NVIDIA CUDA\n"
+            "  pip install faceflash[intel]    # Intel OpenVINO"
+        ) from e
     available = set(ort.get_available_providers())
 
     forced = os.environ.get("FACEFLASH_PROVIDERS")
@@ -83,7 +91,15 @@ def make_session(model_path, quiet: bool = True, dynamic_shapes: bool = False):
     a 12-core CPU, manual thread caps were slower. quiet silences per-inference
     shape warnings (the detector runs at non-metadata input sizes).
     """
-    import onnxruntime as ort
+    try:
+        import onnxruntime as ort
+    except ImportError as e:
+        raise ImportError(
+            "onnxruntime is required for face models. Install one of:\n"
+            "  pip install faceflash[cpu]      # CPU (default)\n"
+            "  pip install faceflash[gpu]      # NVIDIA CUDA\n"
+            "  pip install faceflash[intel]    # Intel OpenVINO"
+        ) from e
     so = ort.SessionOptions()
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     if quiet:
