@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS person_meta (
     value TEXT,
     PRIMARY KEY (name, key)
 );
+CREATE TABLE IF NOT EXISTS access_tokens (
+    token      TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    uses_left  INTEGER NOT NULL,
+    expires    REAL,
+    created_at REAL NOT NULL,
+    consumed_at REAL
+);
 """
 
 
@@ -1016,12 +1024,18 @@ class FaceIndex:
 
         # Keep the rest of the saved index in sync with the compaction
         np.save(index_dir / "vectors.npy", self.vectors)
+        # Write the FULL metadata (calibration + extra/person meta), not just
+        # the base fields — a remove() must not silently drop them.
         with open(index_dir / "metadata.json", "w") as f:
             json.dump({
                 "labels": self.labels,
                 "paths": self.paths,
                 "count": self.count,
                 "pca_fitted": self._pca_fitted,
+                "far_calibration": getattr(self, "_calibration", None),
+                "extra_meta": getattr(self, "_extra_meta", {}),
+                "person_meta": {f"{k[0]}\x00{k[1]}": v for k, v in
+                                getattr(self, "_person_meta", {}).items()},
             }, f)
         cl_path = index_dir / "clusters.npz"
         if cl_path.exists():

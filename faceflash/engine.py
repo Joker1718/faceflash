@@ -93,11 +93,33 @@ def _schedule_allows(rule: str, when) -> bool:
         return False
 
 
+def _schedule_parseable(rule: str) -> bool:
+    """True if the rule's day/time syntax is valid (independent of 'now')."""
+    try:
+        parts = rule.strip().split()
+        for token in parts[0].lower().split(","):
+            for d in (token.split("-") if "-" in token else [token]):
+                _DAYS.index(d[:3])
+        if len(parts) > 1:
+            start_s, end_s = parts[1].split("-")
+            for t in (start_s, end_s):
+                h, m = (list(map(int, t.split(":"))) + [0])[:2]
+                if not (0 <= h <= 23 and 0 <= m <= 59):
+                    return False
+        return True
+    except Exception:
+        return False
+
+
 def _consent_expired(expires: Optional[str]) -> bool:
+    """expires may be a date (YYYY-MM-DD, valid through end of that day) or a
+    full ISO datetime (YYYY-MM-DDTHH:MM:SS, valid to the second)."""
     if not expires:
         return False
     import datetime as _dt
     try:
+        if "T" in expires or " " in expires:
+            return _dt.datetime.now() > _dt.datetime.fromisoformat(expires)
         return _dt.date.today() > _dt.date.fromisoformat(expires)
     except ValueError:
         logger.warning("bad consent expiry %r — treating as expired", expires)
@@ -258,18 +280,21 @@ class FaceFlash:
         """Per-person access schedule, e.g. "Mon-Fri 9:00-18:00".
         Checked by search(..., check_access=True): a face can match and
         still be denied outside its hours."""
-        import datetime as _dt
-        if not _schedule_allows(allowed_hours, _dt.datetime(2026, 1, 5, 12, 0)) \
-                and not _schedule_allows(allowed_hours, _dt.datetime(2026, 1, 10, 12, 0)):
-            # neither a weekday noon nor a weekend noon parses as allowed AND
-            # the parser logged nothing valid -> most likely a bad rule
-            logger.warning("schedule %r may be unparseable — verify format "
-                           "'Mon-Fri 9:00-18:00'", allowed_hours)
+        if not _schedule_parseable(allowed_hours):
+            raise ValueError(
+                f"unparseable schedule {allowed_hours!r} — use e.g. "
+                f"'Mon-Fri 9:00-18:00' or 'Sat,Sun 10:00-14:00'")
         self.index.set_person_meta(name, "schedule", allowed_hours)
 
     def _filter_matches(self, matches, within=None, check_access=False):
-        """Apply consent expiry (always), scope, and schedule to raw matches."""
-        out = []
+        """Apply consent expiry (always), scope, and schedule.
+
+        Returns (allowed, denied). Access-denied matches are moved OUT of the
+        allowed list so a caller acting on matches[0] can never open a door
+        for someone outside their hours; denied entries are reported
+        separately for logging/UX.
+        """
+        allowed, denied = [], []
         scope = set(within) if within else None
         import datetime as _dt
         now = _dt.datetime.now()
@@ -284,10 +309,11 @@ class FaceFlash:
                 if rule and not _schedule_allows(rule, now):
                     m["access"] = "denied"
                     m["reason"] = f"outside scheduled hours ({rule})"
-                else:
-                    m["access"] = "allowed"
-            out.append(m)
-        return out
+                    denied.append(m)
+                    continue
+                m["access"] = "allowed"
+            allowed.append(m)
+        return allowed, denied
 
     def find_duplicates(self, threshold: float = 0.85) -> list:
         """Different names, same face — mislabels and double enrollments."""
@@ -442,8 +468,9 @@ class FaceFlash:
                     "index": idx,
                 }
                 matches.append(match_info)
-        matches = self._filter_matches(matches, within=within,
-                                       check_access=check_access)[:k]
+        matches, denied = self._filter_matches(matches, within=within,
+                                               check_access=check_access)
+        matches = matches[:k]
 
         result = {
             "matches": matches,
@@ -455,6 +482,8 @@ class FaceFlash:
         }
         if max_far is not None:
             result["max_far"] = max_far
+        if check_access and denied:
+            result["access_denied"] = denied
         if query_attrs:
             result["attributes"] = query_attrs
         return result

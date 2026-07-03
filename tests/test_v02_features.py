@@ -312,8 +312,9 @@ def test_access_schedule_denies_outside_hours(tmp_path, monkeypatch):
     _stub_engine_with(monkeypatch, ff, e)
     ff.register("Bob", str(img), allow_fallback=True, check_duplicate=False)
     ff.set_schedule("Bob", "Mon-Fri 9:00-9:01")   # essentially never now
-    m = ff.search(str(img), check_access=True)["matches"][0]
-    assert m["name"] == "Bob" and m["access"] == "denied"
+    res = ff.search(str(img), check_access=True)
+    assert res["matches"] == []                   # denied is not grantable
+    assert res["access_denied"][0]["name"] == "Bob"
     ff.index.close()
 
 
@@ -352,3 +353,56 @@ def test_gallery_dedup_finds_same_face_different_names(tmp_path, monkeypatch):
     dups = ff.find_duplicates(threshold=0.85)
     assert dups and {dups[0]["a"], dups[0]["b"]} == {"Alice", "Alice_dup"}
     ff.index.close()
+
+
+# ── review-fix regressions ──────────────────────────────────────────────────
+
+def test_access_denied_not_in_matches(tmp_path, monkeypatch):
+    """Denied faces must NOT be actionable — matches[0] can't open a door."""
+    from PIL import Image
+    img = tmp_path / "a.jpg"
+    Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8)).save(img)
+    rng = np.random.default_rng(5)
+    e = rng.standard_normal(512).astype(np.float32); e /= np.linalg.norm(e)
+
+    ff = FaceFlash(index_path=str(tmp_path / "g.db"))
+    _stub_engine_with(monkeypatch, ff, e)
+    ff.register("Bob", str(img), allow_fallback=True, check_duplicate=False)
+    ff.set_schedule("Bob", "Mon-Fri 9:00-9:01")   # never, right now
+
+    res = ff.search(str(img), check_access=True)
+    assert res["matches"] == []                    # nothing grantable
+    assert res["access_denied"][0]["name"] == "Bob"
+    assert res["access_denied"][0]["access"] == "denied"
+    ff.index.close()
+
+
+def test_consent_datetime_precision():
+    from faceflash.engine import _consent_expired
+    import datetime as dt
+    future = (dt.datetime.now() + dt.timedelta(hours=1)).isoformat(timespec="seconds")
+    past = (dt.datetime.now() - dt.timedelta(hours=1)).isoformat(timespec="seconds")
+    assert not _consent_expired(future)
+    assert _consent_expired(past)
+    assert not _consent_expired("2999-01-01")      # bare date still works
+
+
+def test_legacy_remove_keeps_person_meta_and_calibration(tmp_path):
+    """#7: remove() in legacy mode must not drop calibration / person meta."""
+    from faceflash.index import FaceIndex
+    embs, labels = _gallery(n=200)
+    idx = FaceIndex()
+    idx.add_batch(embs, labels)
+    idx.set_person_meta("person_0", "consent", "granted")
+    idx.set_calibration({"curve": [[0.001, 0.3]], "n_pairs": 100})
+    idx.save(str(tmp_path / "dir"))
+
+    idx2 = FaceIndex(); idx2.load(str(tmp_path / "dir"))
+    # force the mmap-compaction path
+    idx2.float_vectors = np.load(str(tmp_path / "dir" / "float_vectors.npy"), mmap_mode="r")
+    idx2._float_is_mmap = True
+    idx2.remove("person_5")
+
+    idx3 = FaceIndex(); idx3.load(str(tmp_path / "dir"))
+    assert idx3.get_person_meta("person_0", "consent") == "granted"
+    assert idx3.get_calibration() is not None

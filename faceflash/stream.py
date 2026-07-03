@@ -91,7 +91,8 @@ def _point_in_polygon(x: float, y: float, poly) -> bool:
     for i in range(n):
         xi, yi = poly[i]
         xj, yj = poly[j]
-        if (yi > y) != (yj > y) and                 x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi:
+        crosses = (yi > y) != (yj > y)
+        if crosses and x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi:
             inside = not inside
         j = i
     return inside
@@ -140,7 +141,8 @@ class _VisitorRegistry:
 
     def _assign_locked(self, embedding: np.ndarray) -> tuple:
         if self._centroids:
-            sims = np.array([float(np.dot(c, embedding)) for c in self._centroids])
+            # one matmul over all centroids instead of a python loop
+            sims = np.asarray(self._centroids) @ embedding
             best = int(sims.argmax())
             if sims[best] >= self.threshold:
                 # fold into the running mean (keeps the centroid stable)
@@ -746,8 +748,10 @@ class StreamMonitor:
         if cond:
             q += " WHERE " + " AND ".join(cond)
         q += " ORDER BY ts DESC LIMIT ?"; args.append(limit)
+        with self._engine_lock:
+            rows = self._events_db.execute(q, args).fetchall()
         return [{"timestamp": r[0], "event_type": r[1], "data": json.loads(r[2])}
-                for r in self._events_db.execute(q, args).fetchall()]
+                for r in rows]
 
     def stop(self):
         """Stop the stream processing loop."""
@@ -1143,7 +1147,7 @@ class StreamMonitor:
             threshold = self.engine._threshold_for_far(self.max_far)
 
         anonymous = self.mode == "anonymous"
-        for (track, _, q), embedding in zip(pairs, embeddings):
+        for (track, face, q), embedding in zip(pairs, embeddings):
             # Swap guard: the tracker matches by position, so when two people
             # cross paths a track can end up on the WRONG face. If the new
             # embedding clearly isn't the same person as the stored one,
