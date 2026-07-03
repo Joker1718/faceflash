@@ -86,6 +86,13 @@ class FaceFlash:
             self._attributes = FaceAttributes()
         return self._attributes
 
+    @property
+    def liveness(self) -> LivenessDetector:
+        """Lazy-loaded anti-spoofing detector (~600KB model, downloads on first use)."""
+        if self._liveness is None:
+            self._liveness = LivenessDetector()
+        return self._liveness
+
     def register(self, name: str, image_path: str,
                  allow_fallback: bool = False,
                  check_duplicate: bool = True) -> dict:
