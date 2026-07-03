@@ -238,3 +238,46 @@ def test_webhook_delivery():
     srv.shutdown()
     assert received and received[0]["event_type"] == "person_appeared"
     assert received[0]["data"]["name"] == "bob"
+
+
+# ── anonymous visitor counting + attendance ─────────────────────────────────
+
+def test_visitor_registry_counts_unique_people():
+    from faceflash.stream import _VisitorRegistry
+    rng = np.random.default_rng(9)
+    a = rng.standard_normal(512).astype(np.float32); a /= np.linalg.norm(a)
+    b = rng.standard_normal(512).astype(np.float32); b /= np.linalg.norm(b)
+
+    reg = _VisitorRegistry(threshold=0.55)
+    v1, new1 = reg.assign(a)
+    v1_again, new2 = reg.assign(a * 0.99 + 0.01 * b / np.linalg.norm(a * 0.99 + 0.01 * b))
+    v2, new3 = reg.assign(b)
+
+    assert v1 == "visitor_1" and new1
+    assert v1_again == "visitor_1" and not new2   # same person, same ID
+    assert v2 == "visitor_2" and new3             # different person, new ID
+    assert reg.count == 2
+
+
+def test_attendance_summary():
+    an = Analytics(visit_gap_seconds=60.0)
+    an.person_appeared("alice", 100.0)
+    an.person_update("alice", 150.0)
+    an.person_appeared("alice", 400.0)     # second visit (gap > 60s)
+    an.person_update("alice", 430.0)
+
+    att = an.attendance()
+    assert att["alice"]["visits"] == 2
+    assert att["alice"]["first_seen"] == 100.0
+    assert att["alice"]["total_dwell_seconds"] == 80.0
+
+
+def test_monitor_report_includes_visitor_count():
+    ff_stub = type("E", (), {"n_candidates": 100})()
+    mon = StreamMonitor(ff_stub)
+    rng = np.random.default_rng(11)
+    e = rng.standard_normal(512).astype(np.float32); e /= np.linalg.norm(e)
+    mon.visitors.assign(e)
+    r = mon.report()
+    assert r["unique_unregistered_visitors"] == 1
+    assert "attendance" in r

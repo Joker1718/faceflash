@@ -83,6 +83,48 @@ class _WebhookSender:
                 logger.warning("webhook delivery failed: %s", e)
 
 
+class _VisitorRegistry:
+    """Counts UNIQUE unregistered people by clustering their embeddings.
+
+    Every unknown face gets matched against the visitors seen so far
+    (cosine against a running-mean embedding); a match reuses that
+    pseudonymous ID, a miss mints visitor_N. So five appearances of the
+    same stranger count as ONE visitor, not five unknowns.
+
+    Privacy: embeddings live in memory for this run only — nothing about
+    unregistered people is written to disk (events carry only the
+    pseudonymous ID).
+    """
+
+    def __init__(self, threshold: float = 0.55):
+        self.threshold = threshold
+        self._ids: List[str] = []
+        self._centroids: List[np.ndarray] = []
+        self._counts: List[int] = []
+
+    def assign(self, embedding: np.ndarray) -> tuple:
+        """Returns (visitor_id, is_new)."""
+        if self._centroids:
+            sims = np.array([float(np.dot(c, embedding)) for c in self._centroids])
+            best = int(sims.argmax())
+            if sims[best] >= self.threshold:
+                # fold into the running mean (keeps the centroid stable)
+                n = self._counts[best]
+                c = (self._centroids[best] * n + embedding) / (n + 1)
+                self._centroids[best] = c / (np.linalg.norm(c) + 1e-12)
+                self._counts[best] += 1
+                return self._ids[best], False
+        vid = f"visitor_{len(self._ids) + 1}"
+        self._ids.append(vid)
+        self._centroids.append(embedding / (np.linalg.norm(embedding) + 1e-12))
+        self._counts.append(1)
+        return vid, True
+
+    @property
+    def count(self) -> int:
+        return len(self._ids)
+
+
 class _LatestFrameReader:
     """Capture thread that always holds only the newest frame.
 
@@ -155,6 +197,7 @@ class Track:
     track_id: int
     box: tuple  # (x1, y1, x2, y2)
     identity: Optional[str] = None
+    visitor_id: Optional[str] = None   # pseudonymous ID for unregistered faces
     confidence: float = 0.0
     first_seen: float = 0.0
     last_seen: float = 0.0
@@ -394,6 +437,21 @@ class Analytics:
             )[:10],
         }
 
+    def attendance(self) -> Dict[str, Dict[str, Any]]:
+        """Per-person attendance summary for this run: first/last seen,
+        visit count, total dwell. The raw material for a timesheet."""
+        out = {}
+        for identity, vlist in self.visits.items():
+            if not vlist:
+                continue
+            out[identity] = {
+                "first_seen": vlist[0].first_seen,
+                "last_seen": vlist[-1].last_seen,
+                "visits": len(vlist),
+                "total_dwell_seconds": round(sum(v.dwell_seconds for v in vlist), 1),
+            }
+        return out
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stream Monitor — ties camera + detection + tracking + identification + analytics
@@ -484,6 +542,7 @@ class StreamMonitor:
         self.det_size = det_size
         self.det_model = det_model
         self.display_grace = display_grace
+        self.visitors = _VisitorRegistry()
         self._detector = None          # lazy; False = tried and failed
 
         # Persist events into the SAME faces.db the gallery lives in, so
@@ -715,6 +774,13 @@ class StreamMonitor:
         self._prev_identities = current_identities
         return active_tracks
 
+    def report(self) -> Dict[str, Any]:
+        """Analytics snapshot incl. the unique-unregistered-visitor count."""
+        r = self.analytics.report()
+        r["unique_unregistered_visitors"] = self.visitors.count
+        r["attendance"] = self.analytics.attendance()
+        return r
+
     def _visible_tracks(self) -> List[Track]:
         """Tracks to draw / count as present: detected recently enough."""
         return [t for t in self.tracker.tracks
@@ -830,6 +896,7 @@ class StreamMonitor:
                 old_track = self.tracker.reid_match(embedding, self.reid_threshold)
                 if old_track is not None:
                     track.identity = old_track.identity
+                    track.visitor_id = old_track.visitor_id
                     track.confidence = old_track.confidence
                     track.first_seen = old_track.first_seen
                     # carry the anomaly bookkeeping across the track change
@@ -847,13 +914,21 @@ class StreamMonitor:
             if results and results[0][1] >= threshold:
                 track.identity = results[0][0]
                 track.confidence = results[0][1]
+            elif track.visitor_id is None:
+                # Unregistered: count them as a unique anonymous visitor
+                vid, is_new = self.visitors.assign(embedding)
+                track.visitor_id = vid
+                if is_new:
+                    self._emit(StreamEvent("visitor_new", time.time(),
+                                           {"visitor_id": vid,
+                                            "unique_visitors": self.visitors.count}))
 
     def _draw_frame(self, frame, tracks: List[Track]):
         """Annotate frame with track boxes and names (for show=True)."""
         import cv2
         for track in tracks:
             x1, y1, x2, y2 = track.box
-            name = track.identity or f"Unknown #{track.track_id}"
+            name = track.identity or track.visitor_id or f"Unknown #{track.track_id}"
             color = (0, 255, 0) if track.identity else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             label = f"{name} ({track.confidence:.2f})" if track.identity else name
