@@ -348,6 +348,8 @@ pip install -e ".[cpu,benchmark]" && maturin develop --release
 python -m pytest tests/   # ~20s
 ```
 
+Before tagging or changing benchmark numbers, run the release gates in [docs/TESTING.md](docs/TESTING.md).
+
 Things I haven't gotten to, roughly in order of how much I want them: a DiskANN comparison (the one competitor missing), mobile deployment (ONNX + CoreML), Raspberry Pi / Jetson benchmarks, a WebAssembly build, GPU batched search. (Streaming insertion shipped in v0.2 with the SQLite backend.) Issues are tagged; see [CONTRIBUTING.md](CONTRIBUTING.md). Done work lives in the [CHANGELOG](CHANGELOG.md).
 
 ## Credits

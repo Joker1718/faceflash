@@ -73,6 +73,83 @@ def test_register_flags_duplicates(tmp_path, monkeypatch):
     assert out["duplicate_of"]["confidence"] > 0.99
 
 
+def test_search_refuses_center_crop_query(tmp_path, monkeypatch):
+    """A query with no detected face should not embed/search a center crop."""
+    from PIL import Image
+    import faceflash.engine as engine_module
+
+    img_path = tmp_path / "noface.jpg"
+    Image.fromarray(np.zeros((200, 200, 3), dtype=np.uint8)).save(img_path)
+
+    ff = FaceFlash()
+
+    class FailEmbedder:
+        def embed(self, face):
+            raise AssertionError("center crop should not be embedded")
+
+    monkeypatch.setattr(ff, "_embedder", FailEmbedder())
+    monkeypatch.setattr(
+        engine_module, "detect_and_align_info",
+        lambda img: (np.zeros((112, 112, 3), dtype=np.uint8), "center_crop"))
+
+    out = ff.search(str(img_path))
+    assert out["matches"] == []
+    assert out["filtered"] == "no_face"
+    assert out["detection"] == "center_crop"
+
+
+def test_verify_refuses_center_crop_input(tmp_path, monkeypatch):
+    from PIL import Image
+    import faceflash.engine as engine_module
+
+    img1 = tmp_path / "a.jpg"
+    img2 = tmp_path / "b.jpg"
+    Image.fromarray(np.zeros((200, 200, 3), dtype=np.uint8)).save(img1)
+    Image.fromarray(np.zeros((200, 200, 3), dtype=np.uint8)).save(img2)
+
+    ff = FaceFlash()
+
+    class FailEmbedder:
+        def embed(self, face):
+            raise AssertionError("center crop should not be embedded")
+
+    monkeypatch.setattr(ff, "_embedder", FailEmbedder())
+    monkeypatch.setattr(
+        engine_module, "detect_and_align_info",
+        lambda img: (np.zeros((112, 112, 3), dtype=np.uint8), "center_crop"))
+
+    out = ff.verify(str(img1), str(img2))
+    assert out["match"] is False
+    assert out["filtered"] == "no_face"
+    assert out["image"] == "image1"
+
+
+def test_search_all_does_not_report_center_crop_as_face(tmp_path, monkeypatch):
+    from PIL import Image
+    import faceflash.engine as engine_module
+
+    img_path = tmp_path / "noface.jpg"
+    Image.fromarray(np.zeros((200, 200, 3), dtype=np.uint8)).save(img_path)
+
+    ff = FaceFlash()
+
+    class FailEmbedder:
+        def embed(self, face):
+            raise AssertionError("center crop should not be embedded")
+
+    monkeypatch.setattr(ff, "_embedder", FailEmbedder())
+    monkeypatch.setattr(engine_module, "detect_faces_boxes", lambda img: [{
+        "crop": np.zeros((112, 112, 3), dtype=np.uint8),
+        "box": [0, 0, 112, 112],
+        "det_score": 0.0,
+        "method": "center_crop",
+    }])
+
+    out = ff.search_all(str(img_path))
+    assert out["faces"] == []
+    assert out["n_faces"] == 0
+
+
 # ── FAR calibration ──────────────────────────────────────────────────────────
 
 def test_threshold_from_curve_interpolates_and_clamps():
@@ -152,6 +229,40 @@ def test_cli_names_stats_remove_calibrate(tmp_path, capsys):
     assert main(["remove", "--name", "person_3"] + db) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["removed"] == 5 and out["index_size"] == 1495
+
+
+def test_cli_doctor_human_output(capsys):
+    from faceflash.cli import main
+
+    assert main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "FaceFlash doctor:" in out
+    assert "python:" in out
+
+
+def test_cli_config_export_import(tmp_path, capsys):
+    from faceflash.cli import main
+
+    src = FaceIndex(db_path=str(tmp_path / "src.db"))
+    src.save_camera_config("cam1", source="0", mode="anonymous")
+    src.save_zone_config("cam1", "entry", [(0, 0), (1, 0), (1, 1)])
+    src.close()
+
+    config_path = tmp_path / "config.json"
+    assert main(["config", "export", "--db", str(tmp_path / "src.db"),
+                 "-o", str(config_path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["exported"] and out["cameras"] == 1 and out["zones"] == 1
+
+    assert main(["config", "import", "--db", str(tmp_path / "dst.db"),
+                 str(config_path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["imported"] and out["cameras"] == 1 and out["zones"] == 1
+
+    dst = FaceIndex(db_path=str(tmp_path / "dst.db"))
+    assert dst.get_camera_config("cam1")["mode"] == "anonymous"
+    assert dst.list_zone_configs("cam1")[0]["name"] == "entry"
+    dst.close()
 
 
 # ── streaming across sessions + bounding boxes ──────────────────────────────
@@ -246,10 +357,15 @@ def test_unknown_profile_rejected():
 # ── access control, consent, scoping, audit, dedup ──────────────────────────
 
 def _stub_engine_with(monkeypatch, ff, emb):
+    import faceflash.engine as engine_module
+
     class FakeEmbedder:
         def embed(self, face): return emb
         def embed_batch(self, faces): return __import__("numpy").stack([emb]*len(faces))
     monkeypatch.setattr(ff, "_embedder", FakeEmbedder())
+    monkeypatch.setattr(
+        engine_module, "detect_and_align_info",
+        lambda img: (np.zeros((112, 112, 3), dtype=np.uint8), "haar"))
 
 
 def test_schedule_parsing():

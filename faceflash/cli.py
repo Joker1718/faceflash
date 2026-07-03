@@ -107,6 +107,38 @@ def cmd_stats(args):
     return 0
 
 
+def cmd_doctor(args):
+    from faceflash.doctor import format_doctor, run_doctor
+    report = run_doctor(camera=args.camera)
+    if args.json:
+        _emit(report)
+    else:
+        print(format_doctor(report))
+    return 0 if report["ok"] else 1
+
+
+def cmd_config_export(args):
+    ff = _engine(args)
+    data = ff.index.export_operator_config()
+    if args.output:
+        from pathlib import Path
+        Path(args.output).write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _emit({"exported": True, "path": args.output,
+               "cameras": len(data["cameras"]), "zones": len(data["zones"])})
+    else:
+        print(json.dumps(data, indent=2))
+    return 0
+
+
+def cmd_config_import(args):
+    from pathlib import Path
+    ff = _engine(args)
+    data = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    result = ff.index.import_operator_config(data, replace=args.replace)
+    _emit({"imported": True, **result})
+    return 0
+
+
 def cmd_serve(args):
     """Tiny REST server over the index. Demo-grade: no auth, single-threaded
     writes. Put it behind a reverse proxy for anything real.
@@ -282,6 +314,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("stats", help="index statistics")
     add_db(sp)
     sp.set_defaults(fn=cmd_stats)
+
+    sp = sub.add_parser("doctor", help="diagnose FaceFlash install and runtime support")
+    sp.add_argument("--camera", type=int, default=None,
+                    help="optional webcam index to test, e.g. --camera 0")
+    sp.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON")
+    sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("config", help="import/export operator camera and zone config")
+    cfg_sub = sp.add_subparsers(dest="config_command", required=True)
+    sp_exp = cfg_sub.add_parser("export", help="export camera/zone config as JSON")
+    add_db(sp_exp)
+    sp_exp.add_argument("-o", "--output", default=None,
+                        help="write JSON to a file instead of stdout")
+    sp_exp.set_defaults(fn=cmd_config_export)
+    sp_imp = cfg_sub.add_parser("import", help="import camera/zone config JSON")
+    add_db(sp_imp)
+    sp_imp.add_argument("input")
+    sp_imp.add_argument("--replace", action="store_true",
+                        help="delete existing operator config before importing")
+    sp_imp.set_defaults(fn=cmd_config_import)
 
     sp = sub.add_parser("serve", help="tiny REST API over the index")
     add_db(sp)

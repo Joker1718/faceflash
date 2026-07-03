@@ -5,6 +5,9 @@ dist/
 build/
 .eggs/
 *.onnx
+*.db
+*.db-shm
+*.db-wal
 .faceflash/
 .venv/
 rust/target/

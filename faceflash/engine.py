@@ -449,7 +449,13 @@ class FaceFlash:
                         "liveness_score": round(float(score), 4),
                         "time_ms": round((time.perf_counter() - start) * 1000, 2)}
         else:
-            face = detect_and_align(img)
+            face, method = detect_and_align_info(img)
+            if method == "center_crop":
+                return {"matches": [], "filtered": "no_face",
+                        "detection": method,
+                        "threshold": round(float(threshold), 4),
+                        "time_ms": round((time.perf_counter() - start) * 1000, 2),
+                        "index_size": self.index.count}
 
         embedding = self.embedder.embed(face)
 
@@ -524,11 +530,27 @@ class FaceFlash:
             threshold = self._threshold_for_far(max_far)
 
         img1 = load_image(image1)
-        face1 = detect_and_align(img1)
+        face1, method1 = detect_and_align_info(img1)
+        if method1 == "center_crop":
+            return {"match": False,
+                    "confidence": 0.0,
+                    "threshold": round(float(threshold), 4),
+                    "filtered": "no_face",
+                    "image": "image1",
+                    "detection": method1,
+                    "time_ms": round((time.perf_counter() - start) * 1000, 2)}
         emb1 = self.embedder.embed(face1)
 
         img2 = load_image(image2)
-        face2 = detect_and_align(img2)
+        face2, method2 = detect_and_align_info(img2)
+        if method2 == "center_crop":
+            return {"match": False,
+                    "confidence": 0.0,
+                    "threshold": round(float(threshold), 4),
+                    "filtered": "no_face",
+                    "image": "image2",
+                    "detection": method2,
+                    "time_ms": round((time.perf_counter() - start) * 1000, 2)}
         emb2 = self.embedder.embed(face2)
 
         similarity = float(np.dot(emb1, emb2))
@@ -557,7 +579,8 @@ class FaceFlash:
             threshold = self._threshold_for_far(max_far)
 
         img = load_image(image_path)
-        detections = detect_faces_boxes(img)
+        detections = [d for d in detect_faces_boxes(img)
+                      if d["method"] != "center_crop"]
         faces = []
         for fi, d in enumerate(detections):
             embedding = self.embedder.embed(d["crop"])

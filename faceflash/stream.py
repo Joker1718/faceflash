@@ -257,6 +257,8 @@ class Track:
     frames_seen: int = 0
     frames_missed: int = 0
     embedding: Optional[np.ndarray] = None
+    liveness_score: Optional[float] = None
+    liveness_label: Optional[str] = None
 
 
 class IOUTracker:
@@ -554,6 +556,7 @@ class StreamMonitor:
                  snapshot_dir: Optional[str] = None,
                  mode: str = "identify",
                  watchlist: Optional[List[str]] = None,
+                 check_liveness: bool = False,
                  suggest_enroll_after: int = 5):
         """
         engine: a FaceFlash instance with a loaded gallery.
@@ -657,6 +660,7 @@ class StreamMonitor:
             raise ValueError('mode="watchlist" needs a watchlist of names')
         self.mode = mode
         self.watchlist = set(watchlist or [])
+        self.check_liveness = check_liveness
         self.suggest_enroll_after = suggest_enroll_after
         self._enroll_suggested: set = set()
         self.zones: Dict[str, list] = {}
@@ -978,6 +982,61 @@ class StreamMonitor:
         self._prev_identities = current_identities
         return active_tracks
 
+    def process_frame(self, frame: np.ndarray,
+                      annotate: bool = False) -> Dict[str, Any]:
+        """Process one BGR frame through the full StreamMonitor pipeline.
+
+        This is the adapter UI/server code should use instead of reimplementing
+        detection, tracking, identification, zones, capacity, and alert logic.
+        Returns a serializable snapshot plus an optional annotated frame.
+        """
+        try:
+            import cv2
+        except ImportError:
+            raise ImportError("opencv-python is required: pip install opencv-python")
+
+        emitted: List[StreamEvent] = []
+        self._callbacks.append(emitted.append)
+        try:
+            self._frame_count += 1
+            active = self._process_frame(frame, cv2)
+        finally:
+            self._callbacks.pop()
+
+        annotated = None
+        if annotate:
+            annotated = frame.copy()
+            self._draw_frame(annotated, active)
+
+        tracks = []
+        for t in active:
+            tracks.append({
+                "track_id": t.track_id,
+                "box": [int(v) for v in t.box],
+                "identity": t.identity,
+                "visitor_id": t.visitor_id,
+                "label": t.identity or t.visitor_id or f"track_{t.track_id}",
+                "confidence": round(float(t.confidence), 4),
+                "zones": sorted(t.zones),
+                "frames_seen": int(t.frames_seen),
+                "frames_missed": int(t.frames_missed),
+                "liveness_score": (None if t.liveness_score is None
+                                   else round(float(t.liveness_score), 4)),
+                "liveness_label": t.liveness_label,
+            })
+
+        return {
+            "frame": annotated,
+            "tracks": tracks,
+            "events": [
+                {"event_type": e.event_type,
+                 "timestamp": e.timestamp,
+                 "data": dict(e.data)}
+                for e in emitted
+            ],
+            "report": self.report(),
+        }
+
     def enroll_visitor(self, visitor_id: str, name: str) -> bool:
         """Accept an enrollment_suggested: register the visitor's mean
         embedding under a real name. (A photo enrollment is still better —
@@ -1126,6 +1185,24 @@ class StreamMonitor:
         try:
             pairs = []
             for track in due:
+                if self.check_liveness:
+                    try:
+                        score, label = self.engine.liveness.check_frame(
+                            frame_rgb, track.box)
+                        track.liveness_score = float(score)
+                        track.liveness_label = label
+                        if label != "live":
+                            track.identity = None
+                            track.visitor_id = None
+                            track.confidence = 0.0
+                            self._emit(StreamEvent(
+                                "liveness_failed", time.time(),
+                                {"track_id": track.track_id,
+                                 "label": label,
+                                 "score": round(float(score), 4)}))
+                            continue
+                    except Exception as e:
+                        logger.debug("liveness check failed: %s", e)
                 face = self._face_for_track(track, frame_rgb, crop_by_box)
                 if face is None:
                     continue
@@ -1155,7 +1232,8 @@ class StreamMonitor:
             # cross paths a track can end up on the WRONG face. If the new
             # embedding clearly isn't the same person as the stored one,
             # reset identity and let it re-resolve below.
-            if track.embedding is not None and                     float(np.dot(track.embedding, embedding)) < self.swap_threshold:
+            if (track.embedding is not None and
+                    float(np.dot(track.embedding, embedding)) < self.swap_threshold):
                 track.identity = None
                 track.visitor_id = None
                 track.confidence = 0.0
@@ -1232,12 +1310,23 @@ class StreamMonitor:
     def _draw_frame(self, frame, tracks: List[Track]):
         """Annotate frame with track boxes and names (for show=True)."""
         import cv2
+        for name, poly in self.zones.items():
+            pts = np.array(poly, dtype=np.int32).reshape((-1, 1, 2))
+            color = (0, 140, 255) if name in self._secure_zones else (255, 191, 0)
+            cv2.polylines(frame, [pts], True, color, 2)
+            x, y = pts[:, 0, 0].min(), pts[:, 0, 1].min()
+            cv2.putText(frame, name, (x + 4, max(18, y + 18)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
         for track in tracks:
             x1, y1, x2, y2 = track.box
             name = track.identity or track.visitor_id or f"Unknown #{track.track_id}"
-            color = (0, 255, 0) if track.identity else (0, 0, 255)
+            spoof = track.liveness_label is not None and track.liveness_label != "live"
+            color = (0, 0, 255) if spoof else ((0, 255, 0) if track.identity else (0, 0, 255))
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            label = f"{name} ({track.confidence:.2f})" if track.identity else name
+            if spoof:
+                label = f"SPOOF: {track.liveness_label}"
+            else:
+                label = f"{name} ({track.confidence:.2f})" if track.identity else name
             cv2.putText(frame, label, (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 

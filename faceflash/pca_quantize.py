@@ -26,6 +26,8 @@ class PCABinaryQuantizer:
     """Binary quantizer. fit() on a sample, encode() to get packed codes."""
 
     def __init__(self, n_bits: int = 512):
+        if n_bits <= 0:
+            raise ValueError(f"n_bits must be positive, got {n_bits}")
         self.n_bits = n_bits
         self.W: np.ndarray | None = None
         self.threshold: np.ndarray | None = None

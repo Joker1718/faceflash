@@ -210,6 +210,7 @@ def test_events_persist_to_gallery_db(tmp_path):
 def test_webhook_delivery():
     import json as _json
     import threading as _th
+    import pytest as _pt
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from faceflash.stream import StreamMonitor, StreamEvent
 
@@ -223,7 +224,10 @@ def test_webhook_delivery():
         def log_message(self, *a):
             pass
 
-    srv = HTTPServer(("127.0.0.1", 0), H)
+    try:
+        srv = HTTPServer(("127.0.0.1", 0), H)
+    except PermissionError as e:
+        _pt.skip(f"local socket bind blocked by environment: {e}")
     _th.Thread(target=srv.serve_forever, daemon=True).start()
 
     ff_stub = type("E", (), {"n_candidates": 100})()
@@ -318,6 +322,94 @@ def test_zone_enter_exit_events_and_counts():
         track.zones = now_in
     assert events and events[0].event_type == "zone_entered"
     assert mon.report()["zones"]["entrance"] == 1
+
+
+def test_process_frame_adapter_uses_streammonitor_pipeline():
+    ff_stub = type("E", (), {"n_candidates": 100})()
+    mon = StreamMonitor(ff_stub, mode="anonymous", min_track_frames=1,
+                        min_sharpness=0, persist_events=False)
+    mon.add_zone("entry", [(0, 0), (80, 0), (80, 80), (0, 80)])
+    events = []
+    mon.on_event(events.append)
+
+    box = (10, 10, 50, 50)
+    mon._detect = lambda frame_rgb: ([box], {box: np.ones((112, 112, 3), dtype=np.uint8) * 127}, {box: 1.0})
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    out = mon.process_frame(frame, annotate=True)
+
+    assert out["frame"] is not None
+    assert len(out["tracks"]) == 1
+    assert out["tracks"][0]["zones"] == ["entry"]
+    assert out["report"]["zones"]["entry"] == 1
+    assert any(e["event_type"] == "zone_entered" for e in out["events"])
+    assert any(e.event_type == "zone_entered" for e in events)
+
+
+def test_stream_liveness_live_face_identifies():
+    emb = np.ones(512, dtype=np.float32)
+    emb /= np.linalg.norm(emb)
+
+    class FakeEmbedder:
+        def embed_batch(self, faces): return np.stack([emb] * len(faces))
+
+    class FakeIndex:
+        def search(self, q, k=1, n_candidates=100): return [("Alice", 0.99, 0)]
+
+    class FakeLiveness:
+        def check_frame(self, frame, box): return 0.93, "live"
+
+    eng = type("E", (), {
+        "n_candidates": 100,
+        "embedder": FakeEmbedder(),
+        "index": FakeIndex(),
+        "liveness": FakeLiveness(),
+    })()
+    mon = StreamMonitor(eng, check_liveness=True, min_track_frames=1,
+                        min_sharpness=0, persist_events=False)
+    box = (10, 10, 50, 50)
+    mon._detect = lambda frame_rgb: ([box], {box: np.ones((112, 112, 3), dtype=np.uint8) * 127}, {box: 1.0})
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    out = None
+    for _ in range(3):
+        out = mon.process_frame(frame)
+
+    assert out["tracks"][0]["identity"] == "Alice"
+    assert out["tracks"][0]["liveness_label"] == "live"
+
+
+def test_stream_liveness_spoof_blocks_identification():
+    class FailEmbedder:
+        def embed_batch(self, faces):
+            raise AssertionError("spoof should not be embedded")
+
+    class FakeIndex:
+        def search(self, q, k=1, n_candidates=100):
+            raise AssertionError("spoof should not be searched")
+
+    class FakeLiveness:
+        def check_frame(self, frame, box): return 0.02, "spoof"
+
+    eng = type("E", (), {
+        "n_candidates": 100,
+        "embedder": FailEmbedder(),
+        "index": FakeIndex(),
+        "liveness": FakeLiveness(),
+    })()
+    mon = StreamMonitor(eng, check_liveness=True, min_track_frames=1,
+                        min_sharpness=0, persist_events=False)
+    box = (10, 10, 50, 50)
+    mon._detect = lambda frame_rgb: ([box], {box: np.ones((112, 112, 3), dtype=np.uint8) * 127}, {box: 1.0})
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    out = None
+    for _ in range(3):
+        out = mon.process_frame(frame)
+
+    assert out["tracks"][0]["identity"] is None
+    assert out["tracks"][0]["liveness_label"] == "spoof"
+    assert any(e["event_type"] == "liveness_failed" for e in out["events"])
 
 
 def test_swap_guard_resets_identity_on_face_change():

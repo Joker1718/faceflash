@@ -1,6 +1,10 @@
 """Face detection. SCRFD 5-point alignment preferred, Haar cascade fallback."""
+import logging
+
 import numpy as np
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 
 def load_image(path: str) -> np.ndarray:
@@ -28,8 +32,9 @@ def detect_and_align_info(img: np.ndarray):
         aligned = _rf_align(img)
         if aligned is not None:
             return aligned, "scrfd"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("SCRFD alignment failed; falling back to Haar/center crop: %s",
+                     e, exc_info=True)
     return _detect_haar_fallback_info(img)
 
 
@@ -65,8 +70,9 @@ def detect_faces_boxes(img: np.ndarray) -> list:
                                 "method": "scrfd"})
                 if out:
                     return out
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("SCRFD face detection failed; falling back to Haar/center crop: %s",
+                     e, exc_info=True)
     crop, method, box = _detect_haar_fallback_box(img)
     return [{"crop": crop, "box": box, "det_score": 0.0, "method": method}]
 
@@ -100,10 +106,10 @@ def _detect_haar_fallback_box(img: np.ndarray):
             x2 = min(w, x + fw + margin)
             y2 = min(h, y + fh + margin)
             return img[y1:y2, x1:x2], "haar", [int(x1), int(y1), int(x2), int(y2)]
-    except Exception:
+    except Exception as e:
         # cv2 missing OR broken (partial installs lack CascadeClassifier) —
         # degrade to the center crop rather than crashing register().
-        pass
+        logger.debug("Haar fallback failed; using center crop: %s", e, exc_info=True)
 
     # Final fallback: center crop — NOT a detected face
     h, w = img.shape[:2]

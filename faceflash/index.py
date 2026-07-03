@@ -72,6 +72,24 @@ CREATE TABLE IF NOT EXISTS access_tokens (
     created_at REAL NOT NULL,
     consumed_at REAL
 );
+CREATE TABLE IF NOT EXISTS camera_configs (
+    name       TEXT PRIMARY KEY,
+    source     TEXT NOT NULL DEFAULT '0',
+    settings   TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE TABLE IF NOT EXISTS zone_configs (
+    camera     TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    polygon    TEXT NOT NULL,
+    secure     INTEGER NOT NULL DEFAULT 0,
+    settings   TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (camera, name),
+    FOREIGN KEY (camera) REFERENCES camera_configs(name) ON DELETE CASCADE
+);
 """
 
 
@@ -147,6 +165,9 @@ class FaceIndex:
                 loaded into a RAM arena at open, and float embeddings stay
                 on disk (fetched per-query for the rerank).
         """
+        if n_bits <= 0 or n_bits % 8 != 0:
+            raise ValueError(f"n_bits must be a positive multiple of 8, got {n_bits}")
+
         self.labels: List[str] = []
         self.paths: List[str] = []
         self.count = 0
@@ -217,6 +238,7 @@ class FaceIndex:
         # from handler threads. All callers that share a connection across
         # threads must serialize access (faceflash.cli does, with one lock).
         self._db = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._db.execute("PRAGMA foreign_keys=ON")
         if is_new:
             # A face row is ~2.1 KB (embedding blob dominates). Default 4 KB
             # pages fit ONE row each — half the file would be padding. 16 KB
@@ -568,14 +590,16 @@ class FaceIndex:
         Coarse clustering (IVF) is not applied here: batching targets full-scan
         throughput. Call search() per query if you need the clustered path.
         """
-        self._flush_pending()
-        if self.vectors is None or self.count == 0:
-            return [[] for _ in range(len(query_embeddings))]
-
         query_embeddings = np.ascontiguousarray(query_embeddings, dtype=np.float32)
         if query_embeddings.ndim != 2 or query_embeddings.shape[1] != self.dim:
             raise ValueError(f"Expected (M, {self.dim}) queries, got {query_embeddings.shape}")
         m = query_embeddings.shape[0]
+        if m == 0:
+            return []
+
+        self._flush_pending()
+        if self.vectors is None or self.count == 0:
+            return [[] for _ in range(m)]
 
         # Encode all queries
         if self._pca_fitted:
@@ -898,6 +922,168 @@ class FaceIndex:
             if row:
                 return row[0]
         return None
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Operator config: cameras, zones, thresholds, capacity, watchlists
+    # ─────────────────────────────────────────────────────────────────────
+
+    def save_camera_config(self, name: str, source="0", **settings):
+        """Persist one operator camera profile.
+
+        Settings are intentionally JSON so the config can grow without a DB
+        migration: threshold, mode, det_size, capacity, watchlist, webhook,
+        and future auth/retention knobs can live here. Zones are stored
+        separately by save_zone_config().
+        """
+        name = str(name).strip()
+        if not name:
+            raise ValueError("camera name is required")
+        cfg = {"name": name, "source": str(source), **settings}
+        if not hasattr(self, "_camera_configs"):
+            self._camera_configs = {}
+        self._camera_configs[name] = cfg
+        if self._db is not None:
+            self._db.execute(
+                "INSERT INTO camera_configs(name, source, settings, updated_at) "
+                "VALUES (?, ?, ?, strftime('%s','now')) "
+                "ON CONFLICT(name) DO UPDATE SET source=excluded.source, "
+                "settings=excluded.settings, updated_at=excluded.updated_at",
+                (name, str(source), json.dumps(settings)))
+            self._db.commit()
+        return cfg
+
+    def get_camera_config(self, name: str) -> Optional[dict]:
+        if getattr(self, "_camera_configs", {}).get(name) is not None:
+            return dict(self._camera_configs[name])
+        if self._db is not None:
+            row = self._db.execute(
+                "SELECT source, settings FROM camera_configs WHERE name = ?",
+                (name,)).fetchone()
+            if row:
+                settings = json.loads(row[1] or "{}")
+                return {"name": name, "source": row[0], **settings}
+        return None
+
+    def list_camera_configs(self) -> List[dict]:
+        if self._db is not None:
+            rows = self._db.execute(
+                "SELECT name, source, settings FROM camera_configs ORDER BY name"
+            ).fetchall()
+            return [{"name": r[0], "source": r[1], **json.loads(r[2] or "{}")}
+                    for r in rows]
+        return sorted((dict(v) for v in getattr(self, "_camera_configs", {}).values()),
+                      key=lambda c: c["name"])
+
+    def delete_camera_config(self, name: str) -> bool:
+        removed = False
+        if hasattr(self, "_camera_configs"):
+            removed = self._camera_configs.pop(name, None) is not None
+        if self._db is not None:
+            with self._db:
+                cur = self._db.execute(
+                    "DELETE FROM camera_configs WHERE name = ?", (name,))
+            removed = removed or cur.rowcount > 0
+        return removed
+
+    def save_zone_config(self, camera: str, name: str, polygon,
+                         secure: bool = False, **settings):
+        """Persist one normalized zone for a camera.
+
+        polygon is expected to be normalized [(x,y), ...] with 0..1 values.
+        The UI can still keep draw-time pixels, but production checks should
+        scale normalized polygons to each live frame.
+        """
+        camera = str(camera).strip()
+        name = str(name).strip()
+        if not camera or not name:
+            raise ValueError("camera and zone name are required")
+        if len(polygon) < 3:
+            raise ValueError("A zone needs at least 3 points")
+        poly = [(float(x), float(y)) for x, y in polygon]
+        cfg = {"camera": camera, "name": name, "polygon": poly,
+               "secure": bool(secure), **settings}
+        if not hasattr(self, "_zone_configs"):
+            self._zone_configs = {}
+        self._zone_configs[(camera, name)] = cfg
+        if self._db is not None:
+            if self.get_camera_config(camera) is None:
+                self.save_camera_config(camera)
+            self._db.execute(
+                "INSERT INTO zone_configs(camera, name, polygon, secure, settings, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, strftime('%s','now')) "
+                "ON CONFLICT(camera, name) DO UPDATE SET polygon=excluded.polygon, "
+                "secure=excluded.secure, settings=excluded.settings, "
+                "updated_at=excluded.updated_at",
+                (camera, name, json.dumps(poly), int(bool(secure)),
+                 json.dumps(settings)))
+            self._db.commit()
+        return cfg
+
+    def list_zone_configs(self, camera: Optional[str] = None) -> List[dict]:
+        if self._db is not None:
+            if camera is None:
+                rows = self._db.execute(
+                    "SELECT camera, name, polygon, secure, settings "
+                    "FROM zone_configs ORDER BY camera, name").fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT camera, name, polygon, secure, settings "
+                    "FROM zone_configs WHERE camera = ? ORDER BY name",
+                    (camera,)).fetchall()
+            out = []
+            for r in rows:
+                settings = json.loads(r[4] or "{}")
+                out.append({"camera": r[0], "name": r[1],
+                            "polygon": [tuple(p) for p in json.loads(r[2])],
+                            "secure": bool(r[3]), **settings})
+            return out
+        vals = getattr(self, "_zone_configs", {}).values()
+        out = [dict(v) for v in vals if camera is None or v["camera"] == camera]
+        return sorted(out, key=lambda z: (z["camera"], z["name"]))
+
+    def delete_zone_config(self, camera: str, name: str) -> bool:
+        removed = False
+        if hasattr(self, "_zone_configs"):
+            removed = self._zone_configs.pop((camera, name), None) is not None
+        if self._db is not None:
+            with self._db:
+                cur = self._db.execute(
+                    "DELETE FROM zone_configs WHERE camera = ? AND name = ?",
+                    (camera, name))
+            removed = removed or cur.rowcount > 0
+        return removed
+
+    def export_operator_config(self) -> dict:
+        """Export cameras/zones as portable JSON data."""
+        return {
+            "version": 1,
+            "cameras": self.list_camera_configs(),
+            "zones": self.list_zone_configs(),
+        }
+
+    def import_operator_config(self, config: dict, replace: bool = False) -> dict:
+        """Import cameras/zones from export_operator_config().
+
+        If replace=True, existing operator configs are removed first.
+        """
+        if replace:
+            for z in list(self.list_zone_configs()):
+                self.delete_zone_config(z["camera"], z["name"])
+            for c in list(self.list_camera_configs()):
+                self.delete_camera_config(c["name"])
+
+        cameras = config.get("cameras", [])
+        zones = config.get("zones", [])
+        for c in cameras:
+            settings = {k: v for k, v in c.items() if k not in ("name", "source")}
+            self.save_camera_config(c["name"], c.get("source", "0"), **settings)
+        for z in zones:
+            settings = {k: v for k, v in z.items()
+                        if k not in ("camera", "name", "polygon", "secure")}
+            self.save_zone_config(z["camera"], z["name"], z["polygon"],
+                                  secure=bool(z.get("secure", False)),
+                                  **settings)
+        return {"cameras": len(cameras), "zones": len(zones)}
 
     def find_duplicates(self, threshold: float = 0.85,
                         chunk: int = 512) -> List[dict]:

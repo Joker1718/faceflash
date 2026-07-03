@@ -217,3 +217,61 @@ def test_legacy_npy_backend_unchanged(tmp_path, embeddings):
     idx2.remove("person_9")
     assert "mmap" in idx2.stats()["float_mode"]   # still mmap after remove
     assert idx2.search(embs[10], k=1)[0][0] == "person_10"
+
+
+def test_operator_camera_zone_config_roundtrip(tmp_path):
+    db = tmp_path / "ops.db"
+    idx = FaceIndex(db_path=str(db))
+    idx.save_camera_config(
+        "front-door",
+        source="0",
+        mode="watchlist",
+        threshold=0.45,
+        watchlist=["Alice"],
+        capacity={"limit": 2, "zone": "entry"},
+    )
+    idx.save_zone_config(
+        "front-door",
+        "entry",
+        [(0.1, 0.1), (0.7, 0.1), (0.7, 0.9), (0.1, 0.9)],
+        secure=True,
+    )
+    idx.close()
+
+    reopened = FaceIndex(db_path=str(db))
+    cam = reopened.get_camera_config("front-door")
+    assert cam["source"] == "0"
+    assert cam["mode"] == "watchlist"
+    assert cam["threshold"] == 0.45
+    assert cam["watchlist"] == ["Alice"]
+    zones = reopened.list_zone_configs("front-door")
+    assert len(zones) == 1
+    assert zones[0]["name"] == "entry"
+    assert zones[0]["secure"] is True
+    assert zones[0]["polygon"][0] == (0.1, 0.1)
+    reopened.close()
+
+
+def test_delete_camera_config_removes_zones(tmp_path):
+    idx = FaceIndex(db_path=str(tmp_path / "ops.db"))
+    idx.save_camera_config("cam-a")
+    idx.save_zone_config("cam-a", "zone-a", [(0, 0), (1, 0), (1, 1)])
+    assert idx.delete_camera_config("cam-a")
+    assert idx.get_camera_config("cam-a") is None
+    assert idx.list_zone_configs("cam-a") == []
+    idx.close()
+
+
+def test_operator_config_export_import_replace(tmp_path):
+    src = FaceIndex(db_path=str(tmp_path / "src.db"))
+    src.save_camera_config("cam1", source="rtsp://example/stream", mode="anonymous")
+    src.save_zone_config("cam1", "lobby", [(0, 0), (1, 0), (1, 1)], secure=False)
+    data = src.export_operator_config()
+    src.close()
+
+    dst = FaceIndex(db_path=str(tmp_path / "dst.db"))
+    result = dst.import_operator_config(data, replace=True)
+    assert result == {"cameras": 1, "zones": 1}
+    assert dst.get_camera_config("cam1")["source"] == "rtsp://example/stream"
+    assert dst.list_zone_configs("cam1")[0]["name"] == "lobby"
+    dst.close()

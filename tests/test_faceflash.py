@@ -116,6 +116,16 @@ def test_empty_index_returns_empty():
     assert FaceIndex().search(_unit(1)[0]) == []
 
 
+def test_search_batch_empty_queries_returns_empty():
+    idx, _ = _build()
+    assert idx.search_batch(np.empty((0, 512), dtype=np.float32)) == []
+
+
+def test_invalid_n_bits_rejected():
+    with pytest.raises(ValueError, match="positive multiple of 8"):
+        FaceIndex(n_bits=510)
+
+
 @pytest.mark.parametrize("n_bits", [256, 384, 512])
 def test_n_bits_variants(n_bits):
     idx, embs = _build(n=1200, n_bits=n_bits)

@@ -47,6 +47,7 @@ gpu = ["onnxruntime-gpu>=1.16"]
 intel = ["onnxruntime-openvino>=1.16"]   # Intel CPU/iGPU acceleration
 dev = ["pytest", "matplotlib", "pandas", "onnxruntime>=1.16"]
 benchmark = ["faiss-cpu>=1.7", "usearch>=2.0", "hnswlib>=0.7"]
+operator = ["fastapi>=0.110", "uvicorn>=0.27"]
 
 [project.scripts]
 faceflash = "faceflash.cli:main"

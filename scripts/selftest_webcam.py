@@ -11,6 +11,7 @@ Opens your webcam and walks you through four checks, printing PASS/FAIL:
   4. SWAP GUARD   (optional) a second person never steals your name
 
 Keys:
+  d  run a 5-second detection stability sample
   e  enroll the current face under a name you type in the terminal
   l  run a one-shot liveness check on the current frame
   s  identify the current face against the gallery
@@ -48,19 +49,19 @@ def main():
 
     last_label = ""
     last_live = ""
-    frames_with_box = 0
-    total_frames = 0
+    detect_sample_until = 0.0
+    detect_sample_total = 0
+    detect_sample_hits = 0
 
     while True:
         ok, frame = cap.read()
         if not ok:
             break
-        total_frames += 1
+        now = time.time()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         dets = [d for d in detect_faces_boxes(rgb) if d["method"] == "scrfd"]
 
         if dets:
-            frames_with_box += 1
             d = max(dets, key=lambda d: (d["box"][2] - d["box"][0]) *
                     (d["box"][3] - d["box"][1]))
             x1, y1, x2, y2 = d["box"]
@@ -70,7 +71,21 @@ def main():
                 cv2.putText(frame, hud, (x1, max(20, y1 - 10)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        cv2.putText(frame, "e=enroll  l=liveness  s=identify  r=report  q=quit",
+        if detect_sample_until:
+            detect_sample_total += 1
+            detect_sample_hits += int(bool(dets))
+            remaining = max(0.0, detect_sample_until - now)
+            cv2.putText(frame, f"detection sample {remaining:.1f}s",
+                        (10, 24), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, (0, 255, 255), 2)
+            if now >= detect_sample_until:
+                rate = detect_sample_hits / max(1, detect_sample_total)
+                results["detection"] = rate >= 0.9
+                print(f"  detection stability: {rate*100:.0f}% frames had a SCRFD box")
+                print("    expect >=90% while your face stays visible and still")
+                detect_sample_until = 0.0
+
+        cv2.putText(frame, "d=detect  e=enroll  l=liveness  s=identify  r=report  q=quit",
                     (10, frame.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (255, 255, 255), 1)
         cv2.imshow("FaceFlash self-test", frame)
@@ -78,6 +93,12 @@ def main():
 
         if key == ord("q"):
             break
+
+        elif key == ord("d"):
+            print("  detection sample started: keep your face visible for 5 seconds")
+            detect_sample_until = time.time() + 5.0
+            detect_sample_total = 0
+            detect_sample_hits = 0
 
         elif key == ord("e"):
             if not dets:
@@ -137,12 +158,6 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
-
-    # detection stability: fraction of frames that had a box while you were there
-    if total_frames > 30:
-        rate = frames_with_box / total_frames
-        results["detection"] = rate > 0.5   # rough: face present most of the time
-        print(f"\n  detection: face box present in {rate*100:.0f}% of frames")
 
     _summary(results)
     print(f"\n(throwaway gallery at {os.path.abspath(DB)} — delete when done)")
