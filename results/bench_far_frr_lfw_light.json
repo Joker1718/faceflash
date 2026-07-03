@@ -1,0 +1,83 @@
+{
+  "benchmark": "FAR/FRR at cosine thresholds",
+  "dataset": "lfw_light",
+  "n_embeddings": 13233,
+  "n_identities": 5749,
+  "n_genuine_pairs": 15223,
+  "n_impostor_pairs": 200000,
+  "note": "confidence returned by FaceFlash is raw cosine similarity; these are the error rates a given threshold buys",
+  "table": [
+    {
+      "threshold": 0.2,
+      "far": 0.029265,
+      "frr": 0.029691913551862313
+    },
+    {
+      "threshold": 0.25,
+      "far": 0.00777,
+      "frr": 0.053274650200354726
+    },
+    {
+      "threshold": 0.3,
+      "far": 0.00183,
+      "frr": 0.09321421533206332
+    },
+    {
+      "threshold": 0.35,
+      "far": 0.000385,
+      "frr": 0.1520068317677199
+    },
+    {
+      "threshold": 0.4,
+      "far": 5.5e-05,
+      "frr": 0.23438218485186887
+    },
+    {
+      "threshold": 0.45,
+      "far": 5e-06,
+      "frr": 0.34487288970636537
+    },
+    {
+      "threshold": 0.5,
+      "far": 0.0,
+      "frr": 0.48544964855810285
+    },
+    {
+      "threshold": 0.55,
+      "far": 0.0,
+      "frr": 0.627668659265585
+    },
+    {
+      "threshold": 0.6,
+      "far": 0.0,
+      "frr": 0.7645667739604546
+    },
+    {
+      "threshold": 0.65,
+      "far": 0.0,
+      "frr": 0.8741378177757341
+    },
+    {
+      "threshold": 0.7,
+      "far": 0.0,
+      "frr": 0.937988569927084
+    }
+  ],
+  "eer": 0.02962776670170137,
+  "eer_threshold": 0.1995,
+  "operating_points": {
+    "far_0.01": {
+      "threshold": 0.2405,
+      "frr": 0.04657426262891677
+    },
+    "far_0.001": {
+      "threshold": 0.3198,
+      "frr": 0.11515470012481115
+    },
+    "far_0.0001": {
+      "threshold": 0.3855,
+      "frr": 0.20896012612494252
+    }
+  },
+  "timestamp": "2026-07-02 23:10:01"
+}

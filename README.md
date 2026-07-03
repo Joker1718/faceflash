@@ -272,13 +272,39 @@ Everything here targets plain CPUs; there is no GPU path and no plan for one. Tw
 | Embedding | ArcFace r50 — 51ms | MobileFaceNet — **6ms** |
 | Detection | SCRFD 10g — 44ms | SCRFD 500m — **8ms** |
 | Model download | 166 MB | 13 MB |
-| Accuracy | benchmark numbers above | slightly lower (InsightFace buffalo_s stack) |
+| Verification EER (LFW) | 1.0% | 3.0% |
+| FRR at FAR 0.1% (LFW) | 1.8% | 11.5% |
+| Binary codes still lossless? | 99.9% recall vs exact | **99.8%** — yes |
 
 ```python
 ff = FaceFlash("faces.db", profile="light")    # ~7x faster on a Pi-class CPU
 ```
 
-The two profiles are incompatible embedding spaces — a gallery remembers which one enrolled it and refuses to open with the other. With `light`, run `ff.calibrate()` before using `max_far` (the shipped LFW anchors were measured with the accurate model). For streams: `StreamMonitor(ff, det_model="500m", det_size=320)` processes a frame in ~10ms on plain CPU.
+The two profiles are incompatible embedding spaces — a gallery remembers which one enrolled it and refuses to open with the other. Both profiles ship measured LFW threshold anchors for `max_far` (run `ff.calibrate()` for rates on your own population). The compression result holds for both: PCA+ITQ binary codes lose ~0.1-0.2% recall vs exact search on either embedding model, so the light profile keeps the memory story intact. For streams: `StreamMonitor(ff, det_model="500m", det_size=320)` processes a frame in ~10ms on plain CPU.
+
+### Camera streams (single or multi)
+
+The optional stream layer turns a webcam/RTSP feed into identified, tracked, analytics-bearing events — all on CPU:
+
+```python
+from faceflash.stream import StreamMonitor, MultiCameraMonitor
+
+mon = StreamMonitor(ff)                    # one camera
+mon.add_zone("entrance", [(0,0), (400,0), (400,720), (0,720)])
+mon.on_event("https://your-server/hook")   # or a Python callback
+mon.run(0)                                 # webcam / "rtsp://..." / video file
+mon.report()
+# {"crowd_count": 2, "unique_unregistered_visitors": 7,
+#  "attendance": {"alice": {"visits": 2, "total_dwell_seconds": 3400, ...}},
+#  "zones": {"entrance": 1}}
+
+mc = MultiCameraMonitor(ff, {"door": 0, "lobby": "rtsp://cam2/stream"})
+mc.run()   # one process, one gallery; a stranger seen on both cameras counts ONCE
+```
+
+What it does: IOU tracking with appearance re-ID (occlusions don't reset identity), a swap guard (two people crossing paths can't trade names), unique **unregistered-visitor counting** (unknown faces cluster into pseudonymous IDs — their embeddings stay in memory only, never on disk), per-person attendance summaries, zone enter/exit events, passive liveness (`check_liveness=True` rejects photos/screens), webhook delivery, and events persisted into the same `faces.db` (queryable via `mon.events()` or plain SQL). Opt-in `snapshot_dir=` saves a face crop per appearance for auditable replay — off by default because it stores images of strangers.
+
+Honest status: this layer is a **single-box prototype** validated by tests and one webcam session, not a production NVR — the detection thresholds (`swap_threshold`, `reid_threshold`, `min_sharpness`) are sensible defaults, not measured constants (the visitor threshold IS measured, on LFW). For camera fleets, failover, or hardware acceleration, put a real NVR (e.g. Frigate) in front and use FaceFlash as the recognition backend.
 
 ```
 faceflash/

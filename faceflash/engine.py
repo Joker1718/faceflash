@@ -35,6 +35,17 @@ _LFW_FAR_CURVE = [
     (0.00002, 0.35),
 ]
 
+# Same protocol, light profile (MobileFaceNet). Its score distribution sits
+# lower, so the same FAR needs a different threshold (results/bench_far_frr_lfw_light.json).
+_LFW_FAR_CURVE_LIGHT = [
+    (0.01,    0.240),
+    (0.00183, 0.30),
+    (0.001,   0.320),
+    (0.00038, 0.35),
+    (0.0001,  0.386),
+    (0.00006, 0.40),
+]
+
 
 def _threshold_from_curve(curve, max_far: float) -> float:
     """Interpolate a cosine threshold for a target FAR (log-FAR domain).
@@ -229,15 +240,11 @@ class FaceFlash:
         cal = self.index.get_calibration()
         if cal:
             return _threshold_from_curve(cal["curve"], max_far)
-        if self.profile != "accurate":
-            logger.warning("max_far=%g falling back to LFW anchors that were "
-                           "measured with the 'accurate' model — with the %r "
-                           "profile, run calibrate() for meaningful rates",
-                           max_far, self.profile)
-        else:
-            logger.info("max_far=%g using shipped LFW anchors — run calibrate() "
-                        "to measure thresholds on your own gallery", max_far)
-        return _threshold_from_curve(_LFW_FAR_CURVE, max_far)
+        logger.info("max_far=%g using shipped LFW anchors for the %r profile — "
+                    "run calibrate() to measure thresholds on your own gallery",
+                    max_far, self.profile)
+        curve = _LFW_FAR_CURVE_LIGHT if self.profile == "light" else _LFW_FAR_CURVE
+        return _threshold_from_curve(curve, max_far)
 
     def search(self, image_path: str, k: int = 1, threshold: float = 0.4,
                n_candidates: Optional[int] = None,
