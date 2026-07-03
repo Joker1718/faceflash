@@ -419,7 +419,8 @@ class StreamMonitor:
                  visit_gap_seconds: float = 300.0,
                  anomaly_threshold: int = 3,
                  reid_threshold: float = 0.65,
-                 persist_events: bool = True):
+                 persist_events: bool = True,
+                 det_size: int = 480):
         """
         engine: a FaceFlash instance with a loaded gallery.
         sample_fps: how many frames/sec to process (lower = less CPU).
@@ -434,6 +435,11 @@ class StreamMonitor:
             recently-lost track (appearance re-ID; uses the face embedding).
         persist_events: write events to a stream_events table in the gallery's
             SQLite file (no-op for the legacy .npy backend).
+        det_size: detector input resolution. Detection dominates the frame
+            cost and scales with this (measured on CPU: 640 -> 68ms,
+            480 -> 42ms, 320 -> 21ms per frame). 480 (default) is right for
+            typical webcam/door-cam faces; use 640 when faces are small in
+            the frame, 320 when CPU is tight.
         """
         self.engine = engine
         self.sample_fps = sample_fps
@@ -453,6 +459,8 @@ class StreamMonitor:
         self._frame_count = 0
         self._alerted_tracks = set()   # anomaly alerts already emitted
         self._prev_identities = set()
+        self.det_size = det_size
+        self._detector = None          # lazy; False = tried and failed
 
         # Persist events into the SAME faces.db the gallery lives in, so
         # analytics history survives restarts and is queryable with SQL.
@@ -643,18 +651,15 @@ class StreamMonitor:
         tracks = self.tracker.update(boxes, timestamp)
         self.analytics.update(tracks, timestamp)
 
-        # Only identify tracks that need it (expensive — do sparingly)
+        # Only identify tracks that need it (expensive — do sparingly).
+        # All due tracks in this frame embed in ONE batched ONNX call.
         active_tracks = [t for t in tracks if t.frames_missed == 0]
-        for track in active_tracks:
-            should_identify = (
-                track.identity is None and track.frames_seen >= 3
-            ) or (
-                track.identity is not None and
-                track.frames_seen % self.identify_interval == 0
-            )
-            if should_identify:
-                self._identify_track(track, frame_rgb, timestamp,
-                                     aligned=crop_by_box.get(tuple(track.box)))
+        due = [t for t in active_tracks
+               if (t.identity is None and t.frames_seen >= 3)
+               or (t.identity is not None and
+                   t.frames_seen % self.identify_interval == 0)]
+        if due:
+            self._identify_tracks(due, frame_rgb, crop_by_box)
 
         # Events
         current_identities = {t.identity for t in active_tracks if t.identity}
@@ -684,23 +689,41 @@ class StreamMonitor:
         self._prev_identities = current_identities
         return active_tracks
 
+    def _get_detector(self):
+        """Stream-owned SCRFD at det_size (the shared one is fixed at 640)."""
+        if self._detector is None:
+            try:
+                from faceflash.align import FaceDetector
+                self._detector = FaceDetector(input_size=self.det_size)
+            except Exception as e:
+                logger.warning("SCRFD unavailable (%s) — using Haar fallback", e)
+                self._detector = False
+        return self._detector or None
+
     def _detect(self, frame_rgb: np.ndarray):
         """One detector pass → (boxes, {box: aligned_crop}).
 
         SCRFD gives boxes AND landmarks in a single inference, so the aligned
         112x112 crops come for free — identification then never re-runs the
-        detector on track crops. Haar fallback (no landmarks) returns boxes
-        only; those tracks identify via the per-crop path.
+        detector on track crops. When SCRFD ran and found nothing, that IS
+        the answer — Haar only fills in when SCRFD can't run at all.
         """
-        try:
-            from faceflash.detect import detect_faces_boxes
-            dets = [d for d in detect_faces_boxes(frame_rgb)
-                    if d["method"] == "scrfd"]
-            if dets:
-                boxes = [tuple(d["box"]) for d in dets]
-                return boxes, {tuple(d["box"]): d["crop"] for d in dets}
-        except Exception:
-            pass
+        det = self._get_detector()
+        if det is not None:
+            try:
+                from faceflash.align import align_face
+                raw_boxes, kps = det.detect(frame_rgb)
+                boxes, crops = [], {}
+                for i in range(len(raw_boxes)):
+                    crop = align_face(frame_rgb, kps[i])
+                    if crop is None:
+                        continue
+                    b = tuple(int(round(v)) for v in raw_boxes[i][:4])
+                    boxes.append(b)
+                    crops[b] = crop
+                return boxes, crops
+            except Exception as e:
+                logger.debug("SCRFD detect failed: %s", e)
 
         # Haar fallback with NMS (multi-face; detect_faces_boxes' fallback
         # only reports the largest)
@@ -728,29 +751,44 @@ class StreamMonitor:
 
         return [], {}
 
-    def _identify_track(self, track: Track, frame_rgb: np.ndarray,
-                        timestamp: float, aligned: Optional[np.ndarray] = None):
-        """Try to identify a tracked face against the gallery.
+    def _face_for_track(self, track: Track, frame_rgb: np.ndarray,
+                        crop_by_box: dict):
+        """Aligned crop for a track: free from this frame's detector pass,
+        else crop the track region and re-detect (Haar path)."""
+        aligned = crop_by_box.get(tuple(track.box))
+        if aligned is not None:
+            return aligned
+        from faceflash.detect import detect_and_align
+        x1, y1, x2, y2 = track.box
+        h, w = frame_rgb.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        crop = frame_rgb[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+        return detect_and_align(crop)
 
-        `aligned` is the pre-aligned crop from this frame's detector pass
-        (SCRFD path) — used directly. Without it (Haar path), the track
-        region is cropped and re-detected.
-        """
+    def _identify_tracks(self, due: List[Track], frame_rgb: np.ndarray,
+                         crop_by_box: dict):
+        """Identify a batch of tracks against the gallery (one embed call)."""
         try:
-            if aligned is not None:
-                face = aligned
-            else:
-                from faceflash.detect import detect_and_align
+            pairs = []
+            for track in due:
+                face = self._face_for_track(track, frame_rgb, crop_by_box)
+                if face is not None:
+                    pairs.append((track, face))
+            if not pairs:
+                return
+            embeddings = self.engine.embedder.embed_batch([f for _, f in pairs])
+        except Exception as e:
+            logger.debug("Batch identify failed: %s", e)
+            return
 
-                x1, y1, x2, y2 = track.box
-                h, w = frame_rgb.shape[:2]
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(w, x2), min(h, y2)
-                crop = frame_rgb[y1:y2, x1:x2]
-                if crop.size == 0:
-                    return
-                face = detect_and_align(crop)
-            embedding = self.engine.embedder.embed(face)
+        threshold = self.threshold
+        if self.max_far is not None:
+            threshold = self.engine._threshold_for_far(self.max_far)
+
+        for (track, _), embedding in zip(pairs, embeddings):
             track.embedding = embedding
 
             # Appearance re-ID: did this face belong to a recently-lost track?
@@ -769,23 +807,14 @@ class StreamMonitor:
                     if old_track.track_id in self._alerted_tracks:
                         self._alerted_tracks.add(track.track_id)
                     if track.identity is not None:
-                        return          # identity restored, no gallery search needed
-
-            # Search
-            threshold = self.threshold
-            if self.max_far is not None:
-                threshold = self.engine._threshold_for_far(self.max_far)
+                        continue        # identity restored, no gallery search needed
 
             results = self.engine.index.search(
                 embedding, k=1,
                 n_candidates=self.engine.n_candidates)
-
             if results and results[0][1] >= threshold:
                 track.identity = results[0][0]
                 track.confidence = results[0][1]
-
-        except Exception as e:
-            logger.debug("Identify track %d failed: %s", track.track_id, e)
 
     def _draw_frame(self, frame, tracks: List[Track]):
         """Annotate frame with track boxes and names (for show=True)."""

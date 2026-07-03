@@ -73,7 +73,11 @@ class FaceDetector:
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] \
             if "CUDAExecutionProvider" in ort.get_available_providers() \
             else ["CPUExecutionProvider"]
-        self.session = ort.InferenceSession(str(model_path), providers=providers)
+        so = ort.SessionOptions()
+        so.log_severity_level = 3   # the model's shape metadata assumes 640x640;
+                                    # other input sizes work but warn per inference
+        self.session = ort.InferenceSession(str(model_path), sess_options=so,
+                                            providers=providers)
         self.input_name = self.session.get_inputs()[0].name
         self.output_names = [o.name for o in self.session.get_outputs()]
         self.det_thresh = det_thresh
