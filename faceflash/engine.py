@@ -339,15 +339,10 @@ class FaceFlash:
         db = getattr(self.index, "_db", None)
         if db is not None:
             try:
-                import json as _json
-                rows = db.execute(
-                    "SELECT ts, event_type, data FROM stream_events "
-                    "WHERE data LIKE ? ORDER BY ts", (f'%"{name}"%',)).fetchall()
-                out["events"] = [
-                    {"timestamp": r[0], "event_type": r[1], "data": _json.loads(r[2])}
-                    for r in rows
-                    if name in _json.loads(r[2]).values()
-                ]
+                from faceflash.events import EventStore
+                store = EventStore(db, lock=getattr(self.index, "_db_lock", None))
+                out["events"] = list(reversed(store.query(
+                    data_value=name, limit=10_000)))
             except Exception as e:
                 logger.warning("audit event query failed: %s", e)
         return out

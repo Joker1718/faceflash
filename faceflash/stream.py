@@ -83,19 +83,8 @@ class _WebhookSender:
                 logger.warning("webhook delivery failed: %s", e)
 
 
-def _point_in_polygon(x: float, y: float, poly) -> bool:
-    """Ray-casting point-in-polygon. poly = [(x, y), ...]."""
-    inside = False
-    n = len(poly)
-    j = n - 1
-    for i in range(n):
-        xi, yi = poly[i]
-        xj, yj = poly[j]
-        crosses = (yi > y) != (yj > y)
-        if crosses and x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi:
-            inside = not inside
-        j = i
-    return inside
+# Shared with the webapp / config tooling — one implementation in zones.py.
+from faceflash.zones import point_in_polygon as _point_in_polygon
 
 
 def _sharpness(crop: "np.ndarray") -> float:
@@ -673,18 +662,14 @@ class StreamMonitor:
 
         # Persist events into the SAME faces.db the gallery lives in, so
         # analytics history survives restarts and is queryable with SQL.
-        self._events_db = None
+        self._event_store = None
         if persist_events:
             db = getattr(getattr(engine, "index", None), "_db", None)
             if db is not None:
-                db.execute(
-                    "CREATE TABLE IF NOT EXISTS stream_events ("
-                    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    " ts REAL NOT NULL,"
-                    " event_type TEXT NOT NULL,"
-                    " data TEXT NOT NULL DEFAULT '{}')")
-                db.commit()
-                self._events_db = db
+                from faceflash.events import EventStore
+                lock = getattr(getattr(engine, "index", None), "_db_lock",
+                               self._engine_lock)
+                self._event_store = EventStore(db, lock=lock)
 
     def on_event(self, callback):
         """Register an event callback, or a webhook URL string.
@@ -721,15 +706,10 @@ class StreamMonitor:
     def _emit(self, event: StreamEvent):
         if self.camera_name is not None:
             event.data.setdefault("camera", self.camera_name)
-        if self._events_db is not None:
+        if self._event_store is not None:
             try:
-                # the lock matters under MultiCameraMonitor: N camera threads
-                # share ONE sqlite connection, which is not concurrency-safe
-                with self._engine_lock:
-                    self._events_db.execute(
-                        "INSERT INTO stream_events(ts, event_type, data) VALUES (?, ?, ?)",
-                        (event.timestamp, event.event_type, json.dumps(event.data)))
-                    self._events_db.commit()
+                self._event_store.insert(
+                    event.timestamp, event.event_type, event.data)
             except Exception as e:
                 logger.warning("event persistence failed: %s", e)
         for cb in self._callbacks:
@@ -739,23 +719,17 @@ class StreamMonitor:
                 logger.warning("Event callback error: %s", e)
 
     def events(self, event_type: Optional[str] = None,
-               since: Optional[float] = None, limit: int = 1000) -> List[dict]:
+               since: Optional[float] = None, limit: int = 1000,
+               until: Optional[float] = None,
+               camera: Optional[str] = None,
+               zone: Optional[str] = None,
+               offset: int = 0) -> List[dict]:
         """Query persisted events (newest first) from the gallery's .db."""
-        if self._events_db is None:
+        if self._event_store is None:
             return []
-        q = "SELECT ts, event_type, data FROM stream_events"
-        cond, args = [], []
-        if event_type is not None:
-            cond.append("event_type = ?"); args.append(event_type)
-        if since is not None:
-            cond.append("ts >= ?"); args.append(since)
-        if cond:
-            q += " WHERE " + " AND ".join(cond)
-        q += " ORDER BY ts DESC LIMIT ?"; args.append(limit)
-        with self._engine_lock:
-            rows = self._events_db.execute(q, args).fetchall()
-        return [{"timestamp": r[0], "event_type": r[1], "data": json.loads(r[2])}
-                for r in rows]
+        return self._event_store.query(
+            event_type=event_type, since=since, until=until, camera=camera,
+            zone=zone, limit=limit, offset=offset)
 
     def stop(self):
         """Stop the stream processing loop."""

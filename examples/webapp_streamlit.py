@@ -31,6 +31,7 @@ import numpy as np
 from faceflash.zones import (normalize_polygon, point_in_polygon,
                              polygon_for_frame, rect_to_polygon,
                              zone_counts, zone_payload)
+from faceflash.events import EventStore
 
 st.set_page_config(page_title="FaceFlash", page_icon="⚡", layout="wide")
 st.markdown("""
@@ -757,125 +758,108 @@ def main():
         if db is None:
             st.info("No database found yet. Run the stream or register faces to generate data.")
         else:
-            # Check if stream_events table exists
-            tables = db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='stream_events'"
-            ).fetchone()
+            store = EventStore(db)
+            events = store.query(limit=500)
 
-            if not tables:
-                st.info("No stream events recorded yet. Use the Live Stream or the StreamMonitor API to generate analytics.")
+            if not events:
+                st.info("No events recorded yet. Use the Live Stream or the StreamMonitor API to generate analytics.")
             else:
-                events = db.execute(
-                    "SELECT ts, event_type, data FROM stream_events ORDER BY ts DESC LIMIT 500"
-                ).fetchall()
+                st.write(f"**{len(events)} recent events**")
 
-                if not events:
-                    st.info("No events recorded yet.")
+                # Event type breakdown
+                event_types = [e["event_type"] for e in events]
+                type_counts = Counter(event_types)
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total events", len(events))
+                with col2:
+                    st.metric("Appearances", type_counts.get("person_appeared", 0))
+                with col3:
+                    st.metric("Departures", type_counts.get("person_left", 0))
+
+                st.divider()
+
+                # Visit frequency table
+                st.write("**Visit Frequency**")
+                appeared_events = [e for e in events if e["event_type"] == "person_appeared"]
+                if appeared_events:
+                    visit_names = []
+                    for ev in appeared_events:
+                        data = ev.get("data") or {}
+                        if "name" in data:
+                            visit_names.append(data["name"])
+
+                    if visit_names:
+                        freq = Counter(visit_names)
+                        import pandas as pd
+                        df = pd.DataFrame(
+                            sorted(freq.items(), key=lambda x: -x[1]),
+                            columns=["Person", "Visits"]
+                        )
+                        st.dataframe(df, use_container_width=True, hide_index=True)
                 else:
-                    st.write(f"**{len(events)} recent events**")
+                    st.caption("No appearance events yet.")
 
-                    # Event type breakdown
-                    event_types = [e[1] for e in events]
-                    type_counts = Counter(event_types)
+                st.divider()
 
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Total events", len(events))
-                    with col2:
-                        st.metric("Appearances", type_counts.get("person_appeared", 0))
-                    with col3:
-                        st.metric("Departures", type_counts.get("person_left", 0))
+                # Attendance summary (who was seen today)
+                st.write("**Today's Attendance**")
+                today_start = datetime.datetime.now().replace(
+                    hour=0, minute=0, second=0).timestamp()
+                today_events = store.query(
+                    event_type="person_appeared", since=today_start,
+                    limit=10000)
 
-                    st.divider()
-
-                    # Visit frequency table
-                    st.write("**Visit Frequency**")
-                    appeared_events = [e for e in events if e[1] == "person_appeared"]
-                    if appeared_events:
-                        visit_names = []
-                        for ev in appeared_events:
-                            try:
-                                data = json.loads(ev[2])
-                                if "name" in data:
-                                    visit_names.append(data["name"])
-                            except (json.JSONDecodeError, KeyError):
-                                pass
-
-                        if visit_names:
-                            freq = Counter(visit_names)
-                            import pandas as pd
-                            df = pd.DataFrame(
-                                sorted(freq.items(), key=lambda x: -x[1]),
-                                columns=["Person", "Visits"]
-                            )
-                            st.dataframe(df, use_container_width=True, hide_index=True)
+                if today_events:
+                    today_names = set()
+                    for ev in today_events:
+                        data = ev.get("data") or {}
+                        if "name" in data:
+                            today_names.add(data["name"])
+                    if today_names:
+                        st.write(", ".join(sorted(today_names)))
+                        st.metric("Unique people today", len(today_names))
                     else:
-                        st.caption("No appearance events yet.")
+                        st.caption("No identified appearances today.")
+                else:
+                    st.caption("No events today.")
 
-                    st.divider()
+                st.divider()
 
-                    # Attendance summary (who was seen today)
-                    st.write("**Today's Attendance**")
-                    today_start = datetime.datetime.now().replace(
-                        hour=0, minute=0, second=0).timestamp()
-                    today_events = db.execute(
-                        "SELECT ts, event_type, data FROM stream_events "
-                        "WHERE ts >= ? AND event_type = 'person_appeared' ORDER BY ts",
-                        (today_start,)
-                    ).fetchall()
-
-                    if today_events:
-                        today_names = set()
-                        for ev in today_events:
-                            try:
-                                data = json.loads(ev[2])
-                                if "name" in data:
-                                    today_names.add(data["name"])
-                            except (json.JSONDecodeError, KeyError):
-                                pass
-                        if today_names:
-                            st.write(", ".join(sorted(today_names)))
-                            st.metric("Unique people today", len(today_names))
-                        else:
-                            st.caption("No identified appearances today.")
-                    else:
-                        st.caption("No events today.")
-
-                    st.divider()
-
-                    # Crowd stats (from person_left events with dwell time)
-                    st.write("**Dwell Time Stats**")
-                    left_events = [e for e in events if e[1] == "person_left"]
-                    if left_events:
-                        dwells = []
-                        for ev in left_events:
-                            try:
-                                data = json.loads(ev[2])
-                                if "dwell_seconds" in data:
-                                    dwells.append({
-                                        "name": data.get("name", "unknown"),
-                                        "dwell_seconds": data["dwell_seconds"]
-                                    })
-                            except (json.JSONDecodeError, KeyError):
-                                pass
-                        if dwells:
-                            import pandas as pd
-                            df_dwell = pd.DataFrame(dwells)
-                            avg_dwell = df_dwell.groupby("name")["dwell_seconds"].agg(
-                                ["mean", "count"]).reset_index()
-                            avg_dwell.columns = ["Person", "Avg Dwell (s)", "Visits"]
-                            avg_dwell["Avg Dwell (s)"] = avg_dwell["Avg Dwell (s)"].round(1)
-                            st.dataframe(avg_dwell, use_container_width=True, hide_index=True)
+                # Crowd stats (from person_left events with dwell time)
+                st.write("**Dwell Time Stats**")
+                left_events = [e for e in events if e["event_type"] == "person_left"]
+                if left_events:
+                    dwells = []
+                    for ev in left_events:
+                        data = ev.get("data") or {}
+                        if "dwell_seconds" in data:
+                            dwells.append({
+                                "name": data.get("name", "unknown"),
+                                "dwell_seconds": data["dwell_seconds"]
+                            })
+                    if dwells:
+                        import pandas as pd
+                        df_dwell = pd.DataFrame(dwells)
+                        avg_dwell = df_dwell.groupby("name")["dwell_seconds"].agg(
+                            ["mean", "count"]).reset_index()
+                        avg_dwell.columns = ["Person", "Avg Dwell (s)", "Visits"]
+                        avg_dwell["Avg Dwell (s)"] = avg_dwell["Avg Dwell (s)"].round(1)
+                        st.dataframe(avg_dwell, use_container_width=True, hide_index=True)
                     else:
                         st.caption("No dwell time data yet.")
+                else:
+                    st.caption("No dwell time data yet.")
 
-                    st.divider()
+                st.divider()
 
-                    # Raw event log
-                    with st.expander("Raw event log (last 50)"):
-                        for ev in events[:50]:
-                            ts = datetime.datetime.fromtimestamp(ev[0]).strftime("%Y-%m-%d %H:%M:%S")
-                            st.text(f"[{ts}] {ev[1]}: {ev[2]}")
+                # Raw event log
+                with st.expander("Raw event log (last 50)"):
+                    for ev in events[:50]:
+                        ts = datetime.datetime.fromtimestamp(
+                            ev["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+                        st.text(f"[{ts}] {ev['event_type']}: {json.dumps(ev.get('data') or {})}")
 
             db.close()
 

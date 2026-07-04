@@ -83,3 +83,53 @@ def test_operator_api_ai_search_events(tmp_path):
     assert payload["count"] == 1
     assert payload["events"][0]["event_type"] == "tailgating_risk"
     assert "tailgating_risk=1" in payload["summary"]
+
+
+def test_operator_api_redacts_camera_source(tmp_path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from faceflash.operator_api import create_app
+
+    client = TestClient(create_app(str(tmp_path / "faces.db")))
+    response = client.put("/cameras/front", json={
+        "name": "front",
+        "source": "rtsp://user:secret@example.test:554/live",
+        "settings": {"mode": "anonymous"},
+    })
+
+    assert response.status_code == 200
+    camera = response.json()["camera"]
+    assert "secret" not in camera["source"]
+    assert camera["source"] == "rtsp://***:***@example.test:554/live"
+
+    response = client.get("/cameras")
+    assert "secret" not in response.text
+
+
+def test_operator_api_events_query_uses_event_store(tmp_path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from faceflash import FaceFlash
+    from faceflash.events import EventStore
+    from faceflash.operator_api import create_app
+
+    db = str(tmp_path / "faces.db")
+    ff = FaceFlash(index_path=db)
+    store = EventStore(ff.index._db, lock=ff.index._db_lock)
+    store.insert(_ts("2026-07-03T09:00:00"), "visitor_new",
+                 {"camera": "front", "zone": "lobby"})
+    store.insert(_ts("2026-07-03T10:00:00"), "tailgating_risk",
+                 {"camera": "front", "zone": "entry"})
+    ff.index.close()
+
+    client = TestClient(create_app(db))
+    response = client.get("/events", params={
+        "event_type": "tailgating_risk",
+        "zone": "entry",
+        "limit": 5,
+    })
+
+    assert response.status_code == 200
+    events = response.json()["events"]
+    assert len(events) == 1
+    assert events[0]["event_type"] == "tailgating_risk"

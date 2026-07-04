@@ -446,11 +446,19 @@ def test_audit_report(tmp_path, monkeypatch):
     ff.register("Alice", str(img), allow_fallback=True, check_duplicate=False)
     ff.set_consent("Alice", "granted", expires="2999-01-01")
     ff.set_schedule("Alice", "Mon-Fri 9:00-18:00")
+    from faceflash.events import EventStore
+    EventStore(ff.index._db, lock=ff.index._db_lock).insert(
+        123.0, "person_appeared", {"name": "Alice", "camera": "door"})
 
     a = ff.audit("Alice")
     assert a["enrolled_faces"] == 1
     assert a["consent"] == "granted" and not a["consent_expired"]
     assert a["schedule"] == "Mon-Fri 9:00-18:00"
+    assert a["events"] == [{
+        "timestamp": 123.0,
+        "event_type": "person_appeared",
+        "data": {"name": "Alice", "camera": "door"},
+    }]
     ff.index.close()
 
 

@@ -22,6 +22,7 @@ Two storage backends:
 
 import numpy as np
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Optional, List, Tuple
 import json
@@ -181,6 +182,7 @@ class FaceIndex:
         # SQLite backend state
         self._db: Optional[sqlite3.Connection] = None
         self._db_path: Optional[str] = None
+        self._db_lock = threading.RLock()
         self._ids: List[int] = []                # arena row -> sqlite id
 
         # Pending buffer — batches encode/INSERT work across many add() calls
