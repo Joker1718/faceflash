@@ -2,7 +2,8 @@
 Face anti-spoofing (liveness detection).
 
 Single-frame liveness check using MiniFASNetV2 — a lightweight (~600KB) CNN
-that classifies an 80x80 face crop as live, print-attack, or replay-attack.
+that classifies an 80x80 face crop as live or spoof (Silent-Face's real
+class is index 1; the two spoof classes are reported together as "spoof").
 
 Returns a liveness score (0-1) and a label. Intended to gate identification
 flows against printed-photo and screen-replay attacks. Not foolproof against
@@ -54,7 +55,7 @@ class LivenessDetector:
         detector = LivenessDetector()
         score, label = detector.check(face_crop)
         # score: 0.0 (fake) to 1.0 (live)
-        # label: "live", "print_attack", or "replay_attack"
+        # label: "live" or "spoof"
     """
 
     def __init__(self):
@@ -101,7 +102,7 @@ class LivenessDetector:
         Returns:
             (liveness_score, label)
             - liveness_score: 0.0 (definitely fake) to 1.0 (definitely live)
-            - label: "live", "print_attack", or "replay_attack"
+            - label: "live" or "spoof"
         """
         inp = self.preprocess(face_img)
         outputs = self.session.run(None, {self.input_name: inp})

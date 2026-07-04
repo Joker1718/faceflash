@@ -27,7 +27,6 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cv2
-import numpy as np
 from faceflash import FaceFlash
 from faceflash.detect import detect_faces_boxes
 
